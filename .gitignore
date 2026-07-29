@@ -1,10 +1,34 @@
+# Python
 __pycache__/
 *.pyc
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 环境 & 密钥
 .env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 项目特定
 temp_*/
 kb_chroma_db/
 *.csv
 *.jpg
 *.png
-.DS_Store
-.idea/

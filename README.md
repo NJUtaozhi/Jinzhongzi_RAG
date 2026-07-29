@@ -2,6 +2,9 @@
 
 > 基于 **Agentic RAG** 的多模态心理健康分析系统，支持文本 + 面部表情综合分析。
 > 面向大学生群体，通过面部动作单元（AU）分析 + 文本情绪检测，提供心理学知识驱动的个性化建议。
+>
+> Agent 决策接口 (:8003) 基于 LangChain + LangGraph 串联面部分析 (:8001) + 知识库检索 (:8002) + LLM 推理，
+> 前端 (:8501) 提供完整聊天交互界面。
 
 ---
 
@@ -51,29 +54,38 @@ docker-compose up --build
 ├── README.md                   # 项目说明
 ├── API_DEVELOPMENT_GUIDE.md    # API 开发指南
 ├── api_spec.yaml               # OpenAPI 3.0 接口规范（SSOT）
+├── main.py                     # FastAPI 入口 (Agent API :8003)
+├── requirements.txt            # Python 依赖
 ├── vision_service/             # 成员1：面部分析微服务
 │   └── main.py
 ├── knowledge_service/          # 成员2：知识库检索服务
 │   ├── main.py
 │   ├── build_kb.py
 │   └── knowledge_data.txt
-├── agent_service/              # 成员3：Agent 决策服务
-│   └── main.py
+├── factories/                  # 成员3：Agent 工厂
+│   ├── agent_factory.py        # create_agent 工厂
+│   └── __main__.py             # CLI: python -m factories
+├── orchestration/              # 成员3：LangGraph 编排器
+│   ├── orchestrator.py         # perceive→understand→retrieve→reason→safety→respond
+│   ├── state.py                # 流程状态定义
+│   └── __main__.py             # CLI: python -m orchestration
+├── services/                   # 成员3：下游服务客户端
+│   ├── multimodal_client.py    # Block 1 — 多模态情绪特征 (调用 :8001)
+│   └── rag_client.py           # Block 2 — RAG 知识检索 (调用 :8002)
+├── tools/                      # 成员3：工具集
+│   ├── calculator.py           # 安全表达式计算
+│   ├── tavily_search.py        # Tavily 网络搜索
+│   └── counseling_tools.py     # 心理辅导工具集 (7个策略工具)
+├── tests/                      # 测试
+│   ├── test_pure.py            # 纯逻辑测试
+│   └── test_state_machine.py   # Mock 状态机测试
 ├── frontend/                   # 成员4：Streamlit 前端
 │   └── app.py
 └── docker/                     # 成员5：Docker 构建配置
     ├── vision/
-    │   ├── Dockerfile
-    │   └── requirements.txt
     ├── knowledge/
-    │   ├── Dockerfile
-    │   └── requirements.txt
     ├── agent/
-    │   ├── Dockerfile
-    │   └── requirements.txt
     └── frontend/
-        ├── Dockerfile
-        └── requirements.txt
 ```
 
 ---
@@ -107,12 +119,65 @@ python build_kb.py                          # 先构建知识库
 uvicorn main:app --host 0.0.0.0 --port 8002 --reload
 
 # 终端3 — Agent Service
-cd agent_service
 uvicorn main:app --host 0.0.0.0 --port 8003 --reload
 
 # 终端4 — Frontend
 cd frontend
 streamlit run app.py
+```
+
+---
+
+## 📡 Agent API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 健康检查 |
+| GET | `/health` | 健康检查 (含下游服务地址) |
+| POST | `/chat` | 单轮心理健康辅导对话 |
+| GET | `/docs` | OpenAPI 文档 |
+
+### 请求示例
+
+```json
+POST /chat
+{
+  "query": "我最近总是失眠, 很焦虑",
+  "session_id": "user-001",
+  "history": [],
+  "max_iterations": 8
+}
+```
+
+```json
+{
+  "answer": "我理解你现在的感受...",
+  "status": "completed",
+  "intent": "seeking_emotional_support",
+  "emotion": "anxiety",
+  "react_trace": ["Thought: ...", "Action: ...", "Observation: ..."]
+}
+```
+
+---
+
+## 🖥️ CLI 入口
+
+```bash
+# 简单 Agent 测试
+python -m factories --query "1 + 2 等于多少？"
+
+# 编排器单轮测试
+python -m orchestration --query "如何缓解压力" --verbose
+```
+
+---
+
+## 🧪 运行测试
+
+```bash
+python tests/test_pure.py           # 28 个纯逻辑测试
+python tests/test_state_machine.py  # 33 个 Mock 状态机测试
 ```
 
 ---
@@ -131,7 +196,7 @@ streamlit run app.py
 | **吴鑫涛**（组长） | 后端架构 + Docker 编排 + CI/CD | docker-compose 一键部署、GitHub 仓库管理 |
 | 高翊轩 | 多模态数据处理 | FastAPI + OpenFace 面部分析接口 |
 | 高天阔 | RAG 检索与知识库 | FastAPI + Chroma 语义检索接口 |
-| 单嵩然 | Agent 决策与工具调用 | LangChain + LLM 多模态决策接口 |
+| 单嵩然 | Agent 决策与工具调用 | LangChain + LangGraph 多模态决策接口 |
 | 胥庆阳 | 前端界面 | Streamlit 聊天界面 + 情绪曲线可视化 |
 
 ---
