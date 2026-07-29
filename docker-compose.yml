@@ -40,11 +40,20 @@ services:
       dockerfile: docker/agent/Dockerfile
     ports:
       - "8003:8003"
+    volumes:
+      - ./main.py:/app/main.py
+      - ./factories:/app/factories
+      - ./orchestration:/app/orchestration
+      - ./services:/app/services
+      - ./tools:/app/tools
     environment:
-      - VISION_API_URL=http://vision:8001/v1/vision/analyze-face
-      - KNOWLEDGE_API_URL=http://knowledge:8002/v1/knowledge/retrieve
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_API_BASE=${OPENAI_API_BASE}
+      # 成员3 代码使用的环境变量名（与 .env.example 对齐）
+      - MULTIMODAL_BASE_URL=http://vision:8001
+      - RAG_BASE_URL=http://knowledge:8002
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - AGENT_HOST=0.0.0.0
+      - AGENT_PORT=8003
     depends_on:
       vision:
         condition: service_healthy
@@ -63,8 +72,10 @@ services:
       dockerfile: docker/frontend/Dockerfile
     ports:
       - "8501:8501"
+    volumes:
+      - ./frontend:/app
     environment:
-      - AGENT_API_URL=http://agent:8003/v1/agent/analyze
+      - AGENT_API_URL=http://agent:8003/chat
     depends_on:
       agent:
         condition: service_healthy

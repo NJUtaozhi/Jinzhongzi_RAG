@@ -1,0 +1,580 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "金种子",
+    "description": "",
+    "version": "1.0.0"
+  },
+  "tags": [],
+  "paths": {
+    "/v1/agent/analyze": {
+      "post": {
+        "summary": "多模态情绪分析和决策",
+        "deprecated": false,
+        "description": "",
+        "tags": [],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image": {
+                    "format": "binary",
+                    "type": "string",
+                    "description": "用户上传的人脸图片",
+                    "example": ""
+                  },
+                  "text": {
+                    "description": "用户输入的文本，从中应能隐式或者显式捕捉到情绪信号",
+                    "example": "寻寻觅觅冷冷清清凄凄惨惨戚戚，乍暖还寒时候，最难将息。三杯两盏淡酒，怎敌它，晚来风急，雁过也，正伤心，却是旧时相识。",
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "description": "用户唯一标识，用于记录历史",
+                    "example": "{{$string.uuid}}",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "image",
+                  "text"
+                ]
+              },
+              "example": {
+                "image": "",
+                "text": "寻寻觅觅冷冷清清凄凄惨惨戚戚，乍暖还寒时候，最难将息。三杯两盏淡酒，怎敌它，晚来风急，雁过也，正伤心，却是旧时相识。",
+                "user_id": "{{$string.uuid}}"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "analysis": {
+                          "type": "object",
+                          "properties": {
+                            "image_emotion": {
+                              "type": "object",
+                              "properties": {
+                                "dominant_emotion": {
+                                  "type": "string"
+                                },
+                                "au12_r_smile_intensity": {
+                                  "type": "number"
+                                },
+                                "au04_r_brow_lower": {
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "dominant_emotion",
+                                "au12_r_smile_intensity",
+                                "au04_r_brow_lower"
+                              ]
+                            },
+                            "text_sentiment": {
+                              "type": "string"
+                            },
+                            "text_keywords": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "image_emotion",
+                            "text_sentiment",
+                            "text_keywords"
+                          ]
+                        },
+                        "decision": {
+                          "type": "string"
+                        },
+                        "reply": {
+                          "type": "string"
+                        },
+                        "advice_source": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "analysis",
+                        "decision",
+                        "reply",
+                        "advice_source"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "code": 200,
+                  "msg": "success",
+                  "data": {
+                    "analysis": {
+                      "image_emotion": {
+                        "dominant_emotion": "sadness",
+                        "au12_r_smile_intensity": 0.2,
+                        "au04_r_brow_lower": 1.8
+                      },
+                      "text_sentiment": "negative",
+                      "text_keywords": [
+                        "焦虑",
+                        "压力"
+                      ]
+                    },
+                    "decision": "need_knowledge",
+                    "reply": "听起来你有些焦虑，这是很常见的情绪。研究表明，适度运动可以有效缓解焦虑情绪。",
+                    "advice_source": "从知识库检索到的心理学论文摘要"
+                  }
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "$ref": "#/components/responses/参数缺失",
+            "description": "请求参数不全"
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/knowledge/retrieve": {
+      "post": {
+        "summary": "心理学知识语义检索",
+        "deprecated": false,
+        "description": "",
+        "tags": [],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "检索查询语句，由Agent根据用户输入生成"
+                  },
+                  "top_k": {
+                    "type": "integer",
+                    "description": "返回最相关的知识片段条数，默认为1"
+                  }
+                },
+                "required": [
+                  "query"
+                ]
+              },
+              "example": {
+                "query": "感到焦虑和压力大时应该如何应对",
+                "top_k": 1
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "description": "业务状态码，200表示成功"
+                    },
+                    "msg": {
+                      "type": "string",
+                      "description": "响应信息，\"success\"表示成功"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "results": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "score": {
+                                "type": "number",
+                                "description": "相关性评分，0~1之间"
+                              },
+                              "source": {
+                                "type": "string",
+                                "description": "知识来源（论文/书籍/报告名称）"
+                              },
+                              "content": {
+                                "type": "string",
+                                "description": "知识片段的具体内容"
+                              }
+                            },
+                            "required": [
+                              "score",
+                              "source",
+                              "content"
+                            ]
+                          },
+                          "description": "检索结果列表，按相关性从高到低排列"
+                        }
+                      },
+                      "description": "响应数据主体",
+                      "required": [
+                        "results"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "code": 200,
+                  "msg": "success",
+                  "data": {
+                    "results": [
+                      {
+                        "content": "多项研究表明，正念冥想、规律的有氧运动（如跑步、游泳）以及建立稳定的社会支持网络，是缓解焦虑和压力的有效行为策略。",
+                        "source": "《大学生压力应对方式与心理健康的关系研究》，2020，心理学报。",
+                        "score": 0.92
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "",
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "description": "业务错误码，用于标识具体错误类型。40001 表示“query参数为空”"
+                    },
+                    "msg": {
+                      "type": "string",
+                      "description": "用户友好的错误描述信息，可直接展示给用户或用于日志记录"
+                    },
+                    "data": {
+                      "type": "null",
+                      "description": "错误时无数据返回，固定为 null"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "code": 40001,
+                  "msg": "query参数不能为空，请提供有效的检索语句",
+                  "data": null
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/vision/analyze-face": {
+      "post": {
+        "summary": "面部动作单元（AU）分析",
+        "deprecated": false,
+        "description": "",
+        "tags": [],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image": {
+                    "format": "binary",
+                    "type": "string",
+                    "example": ""
+                  }
+                },
+                "required": [
+                  "image"
+                ]
+              },
+              "example": {
+                "image": ""
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "face_detected": {
+                          "type": "boolean"
+                        },
+                        "dominant_emotion": {
+                          "type": "string"
+                        },
+                        "au_analysis": {
+                          "type": "object",
+                          "properties": {
+                            "AU01_r": {
+                              "type": "number"
+                            },
+                            "AU02_r": {
+                              "type": "integer"
+                            },
+                            "AU04_r": {
+                              "type": "number"
+                            },
+                            "AU05_r": {
+                              "type": "number"
+                            },
+                            "AU06_r": {
+                              "type": "number"
+                            },
+                            "AU07_r": {
+                              "type": "number"
+                            },
+                            "AU09_r": {
+                              "type": "number"
+                            },
+                            "AU10_r": {
+                              "type": "number"
+                            },
+                            "AU12_r": {
+                              "type": "number"
+                            },
+                            "AU14_r": {
+                              "type": "number"
+                            },
+                            "AU15_r": {
+                              "type": "number"
+                            },
+                            "AU17_r": {
+                              "type": "number"
+                            },
+                            "AU20_r": {
+                              "type": "number"
+                            },
+                            "AU23_r": {
+                              "type": "number"
+                            },
+                            "AU25_r": {
+                              "type": "number"
+                            },
+                            "AU26_r": {
+                              "type": "number"
+                            },
+                            "AU45_r": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "AU01_r",
+                            "AU02_r",
+                            "AU04_r",
+                            "AU05_r",
+                            "AU06_r",
+                            "AU07_r",
+                            "AU09_r",
+                            "AU10_r",
+                            "AU12_r",
+                            "AU14_r",
+                            "AU15_r",
+                            "AU17_r",
+                            "AU20_r",
+                            "AU23_r",
+                            "AU25_r",
+                            "AU26_r",
+                            "AU45_r"
+                          ]
+                        },
+                        "hint": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "face_detected",
+                        "dominant_emotion",
+                        "au_analysis",
+                        "hint"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "code": 200,
+                  "msg": "success",
+                  "data": {
+                    "face_detected": true,
+                    "dominant_emotion": "happiness",
+                    "au_analysis": {
+                      "AU01_r": 0.1,
+                      "AU02_r": 0,
+                      "AU04_r": 0.3,
+                      "AU05_r": 0.2,
+                      "AU06_r": 1.2,
+                      "AU07_r": 0.5,
+                      "AU09_r": 0.1,
+                      "AU10_r": 0.4,
+                      "AU12_r": 2.5,
+                      "AU14_r": 0.8,
+                      "AU15_r": 0.2,
+                      "AU17_r": 0.3,
+                      "AU20_r": 0.6,
+                      "AU23_r": 0.1,
+                      "AU25_r": 1.8,
+                      "AU26_r": 1.2,
+                      "AU45_r": 0
+                    },
+                    "hint": "AU12_r (嘴角上扬) 数值较高，可能表示笑容。"
+                  }
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "code": 40010,
+                  "msg": "未检测到人脸，请提供包含清晰正面人脸的图片。",
+                  "data": null
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": []
+      }
+    }
+  },
+  "components": {
+    "schemas": {},
+    "responses": {
+      "参数缺失": {
+        "description": "请求参数不全",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "integer",
+                  "title": "参数缺失码",
+                  "description": "参数缺失码暂且\n定义为40001"
+                },
+                "msg": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "null"
+                },
+                "error_code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "msg",
+                "data"
+              ]
+            },
+            "examples": {
+              "示例 1": {
+                "summary": "示例 1",
+                "value": {
+                  "code": 40001,
+                  "msg": "缺少必要参数: [具体缺失的字段]",
+                  "data": null,
+                  "error_code": "MISSING_REQUIRED_PARAMETER"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {}
+  },
+  "servers": [],
+  "security": []
+}
