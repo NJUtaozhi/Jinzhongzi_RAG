@@ -16,8 +16,7 @@ import json
 # ============================================================
 # 配置区
 # ============================================================
-AGENT_API_URL = "http://127.0.0.1:8003/v1/agent/analyze"  # 成员3的接口地址
-HEALTH_CHECK_URL = "http://127.0.0.1:8003/health"  # 健康检查地址
+AGENT_API_URL = "http://101.34.68.33:8003/v1/agent/analyze"  # 成员3的接口地址
 
 # 情绪分数映射
 SENTIMENT_SCORE_MAP = {
@@ -81,7 +80,7 @@ with st.sidebar:
 # 后端健康检查
 # ============================================================
 try:
-    health = requests.get(HEALTH_CHECK_URL, timeout=3)
+    health = requests.get(f"{AGENT_API_URL.replace('/v1/agent/analyze', '')}/health", timeout=3)
     if health.status_code == 200:
         deps = health.json().get("dependencies", {})
         st.caption(
