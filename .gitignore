@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+temp_*/
+kb_chroma_db/
+*.csv
+*.jpg
+*.png
+.DS_Store
+.idea/

@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  vision:
+    build:
+      context: .
+      dockerfile: docker/vision/Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./vision_service:/app
+    environment:
+      - OPENFACE_BIN=FaceLandmarkImg.exe
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  knowledge:
+    build:
+      context: .
+      dockerfile: docker/knowledge/Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./knowledge_service:/app
+      - kb_data:/app/kb_chroma_db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - VISION_API_URL=http://vision:8001/v1/vision/analyze-face
+      - KNOWLEDGE_API_URL=http://knowledge:8002/v1/knowledge/retrieve
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE}
+    depends_on:
+      vision:
+        condition: service_healthy
+      knowledge:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - AGENT_API_URL=http://agent:8003/v1/agent/analyze
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  kb_data:
