@@ -11,8 +11,25 @@ app = FastAPI(title="Knowledge Retrieval Service")
 print("Loading vector model...")
 model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 chroma_client = chromadb.PersistentClient(path="./kb_chroma_db")
-collection = chroma_client.get_collection(name="mental_health_knowledge")
+collection = chroma_client.get_or_create_collection(
+    name="mental_health_knowledge",
+    metadata={"description": "心理健康知识库"}
+)
 print(f"Knowledge base ready, {collection.count()} records.")
+
+# 如果知识库为空，自动构建
+if collection.count() == 0:
+    print("Knowledge base is empty, auto-building...")
+    try:
+        with open("knowledge_data.txt", "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        if lines:
+            ids = [f"doc_{i+1}" for i in range(len(lines))]
+            embeddings = [model.encode(text).tolist() for text in lines]
+            collection.add(documents=lines, ids=ids, embeddings=embeddings)
+            print(f"Auto-built: {collection.count()} records.")
+    except Exception as e:
+        print(f"Auto-build failed: {e}")
 
 class RetrieveRequest(BaseModel):
     query: str
