@@ -20,8 +20,14 @@ from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+import json
+import shutil
+import tempfile
+import uuid
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # 最优先加载 .env
@@ -147,6 +153,78 @@ async def chat_stream(req: ChatRequest):
     """流式对话 (SSE) — 暂未实现, 保留接口."""
     # TODO: 实现 SSE 流式输出
     raise HTTPException(status_code=501, detail="流式接口开发中")
+
+
+@app.post("/v1/agent/analyze", tags=["兼容"])
+async def agent_analyze(
+    text: str = Form(..., description="用户输入文本"),
+    image: UploadFile = File(None, description="可选: 面部图片"),
+    user_id: str = Form(None, description="可选: 用户ID"),
+):
+    """兼容成员4前端的 /v1/agent/analyze 路由.
+
+    接收 multipart/form-data (text + image),
+    转换为内部 /chat 格式调用, 返回前端期望的 {code, msg, data} 结构.
+    """
+    # 处理图片: 保存到临时文件, 获取路径
+    image_path = None
+    if image and image.filename:
+        temp_dir = tempfile.mkdtemp(prefix="agent_img_")
+        try:
+            img_bytes = await image.read()
+            img_path = os.path.join(temp_dir, image.filename or "upload.jpg")
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+            image_path = img_path
+        except Exception:
+            pass
+
+    try:
+        orch = get_orch()
+        result = orch.run(
+            user_query=text,
+            session_id=user_id or str(uuid.uuid4())[:8],
+            conversation_history=None,
+            image_path=image_path,
+            audio_path=None,
+            max_iterations=8,
+        )
+
+        # 提取情绪信息
+        image_emotion_data = {
+            "dominant_emotion": result.get("emotion_label", "unknown"),
+            "au12_r_smile_intensity": 0,
+            "au04_r_brow_lower": 0,
+        }
+
+        # 组装前端期望格式
+        return {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "analysis": {
+                    "image_emotion": image_emotion_data,
+                    "text_sentiment": result.get("emotion_label", "neutral"),
+                    "text_keywords": [],
+                },
+                "decision": result.get("intent", "neutral"),
+                "reply": result.get("final_answer", ""),
+                "advice_source": "Agent 综合分析",
+            },
+        }
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 50000,
+                "msg": f"Agent 服务内部错误: {str(exc)}",
+                "data": None,
+            },
+        )
+    finally:
+        # 清理临时图片
+        if image_path and os.path.exists(os.path.dirname(image_path)):
+            shutil.rmtree(os.path.dirname(image_path), ignore_errors=True)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
