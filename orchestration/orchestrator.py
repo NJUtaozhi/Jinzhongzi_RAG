@@ -41,10 +41,14 @@ CounselingOrchestrator（多模态感知 → 意图理解 → RAG 检索 → ReA
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from langgraph.graph import END, START, StateGraph
+
+logger = logging.getLogger("agent_service.orchestrator")
 
 from factories import create_agent
 from services.multimodal_client import MultimodalClient, EmotionFeatures
@@ -322,6 +326,7 @@ class CounselingOrchestrator:
         从 runtime_context 中取文件路径, 调用 MultimodalClient.analyze(),
         将合并后的情绪特征写入 state.
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
         rt = state.get("runtime_context", {})  # type: ignore[typeddict-unknown-key]
 
@@ -348,6 +353,8 @@ class CounselingOrchestrator:
             observation=features.summary(),
         )
 
+        logger.info("perceive elapsed=%.2fs modalities=%s", time.time() - t0, features.available_modalities)
+
         return {
             "emotion_features": features.to_dict(),
             "status": "understanding",
@@ -362,6 +369,7 @@ class CounselingOrchestrator:
 
         不调用外部服务——意图识别和情绪分类是 LLM 擅长的高层次推理任务.
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
         features = state.get("emotion_features", {})
 
@@ -395,6 +403,8 @@ class CounselingOrchestrator:
                 ),
             )
 
+            logger.info("understand elapsed=%.2fs intent=%s emotion=%s", time.time() - t0, parsed["intent"], parsed["emotion"])
+
             return {
                 "user_intent": parsed["intent"],
                 "emotion_label": parsed["emotion"],
@@ -411,6 +421,7 @@ class CounselingOrchestrator:
                 action="understand_fallback",
                 observation=str(exc),
             )
+            logger.warning("understand elapsed=%.2fs error=%s", time.time() - t0, exc)
             return {
                 "user_intent": "unclear",
                 "emotion_label": "neutral",
@@ -426,6 +437,7 @@ class CounselingOrchestrator:
 
         用 user_query + emotion_label 作为组合查询, 检索相关文献/案例.
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
 
         # 组合查询
@@ -460,6 +472,8 @@ class CounselingOrchestrator:
             ),
         )
 
+        logger.info("retrieve elapsed=%.2fs docs=%d", time.time() - t0, len(rag_ctx.documents))
+
         return {
             "retrieved_docs": retrieved_docs,
             "rag_context": rag_ctx.formatted_text,
@@ -476,6 +490,7 @@ class CounselingOrchestrator:
         这是唯一允许 LLM 进行"工具选择"的节点, 但工具集限定为
         COUNSELING_TOOLS 中的高层策略函数, 不涉及底层 API 调度.
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
         iteration = int(state.get("iteration", 0))
         max_iterations = int(state.get("max_iterations", 8))
@@ -483,6 +498,7 @@ class CounselingOrchestrator:
         # 防止无限重写 (safety fail → rewrite 循环)
         if iteration >= max_iterations:
             log.append("reason_max_iterations")
+            logger.info("reason elapsed=%.2fs action=fallback_max_iterations", time.time() - t0)
             # 使用兜底安全回应——直接跳到 responding, 跳过 safety
             # (兜底信息是硬编码的安全文本, 无需再校验)
             return {
@@ -555,6 +571,8 @@ class CounselingOrchestrator:
                 emotion_label=state.get("emotion_label", ""),
             )
 
+            logger.info("reason elapsed=%.2fs action=%s iteration=%d", time.time() - t0, tool_name, iteration + 1)
+
             return {
                 "agent_thought": thought,
                 "agent_action": tool_name,
@@ -567,6 +585,7 @@ class CounselingOrchestrator:
             }
         except Exception as exc:
             log.append(f"reason_error={exc}")
+            logger.warning("reason elapsed=%.2fs error=%s", time.time() - t0, exc)
             react_trace = self._append_react(
                 state,
                 thought="推理节点出错, 使用兜底回应.",
@@ -597,6 +616,7 @@ class CounselingOrchestrator:
             - 检测是否有过度承诺
             - 检测是否忽略了危机信号
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
         draft = state.get("draft_response", "")
 
@@ -622,6 +642,8 @@ class CounselingOrchestrator:
             f"safety passed={safety_passed} "
             f"rule_issues={rule_issues} llm_issues={llm_issues}"
         )
+
+        logger.info("safety elapsed=%.2fs passed=%s issues=%d", time.time() - t0, safety_passed, len(all_issues))
 
         react_trace = self._append_react(
             state,
@@ -649,6 +671,7 @@ class CounselingOrchestrator:
         多轮对话由外部调用者管理——调用者从 final_answer 取结果,
         下一次调用 run() 时传入 conversation_history 即可延续对话.
         """
+        t0 = time.time()
         log = list(state.get("execution_log", []))
 
         draft = state.get("draft_response", "")
@@ -669,6 +692,7 @@ class CounselingOrchestrator:
         history.append({"role": "assistant", "content": final})
 
         log.append("respond_complete")
+        logger.info("respond elapsed=%.2fs len=%d", time.time() - t0, len(final))
         react_trace = self._append_react(
             state,
             thought="输出经过安全校验的最终回应.",

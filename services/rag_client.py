@@ -21,6 +21,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -116,13 +117,15 @@ class RAGClient:
 
     def _http_post(self, path: str, body: str, headers: Dict[str, str]) -> Dict[str, Any]:
         """带重试的 HTTP POST."""
+        parsed = urlparse(self._base_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
         last_exc = None
         for attempt in range(self._MAX_RETRIES):
             conn = None
             try:
-                conn = http.client.HTTPConnection(
-                    self._base_url, timeout=self._timeout
-                )
+                conn = http.client.HTTPConnection(host, port, timeout=self._timeout)
                 conn.request("POST", path, body.encode("utf-8"), headers)
                 res = conn.getresponse()
                 data = res.read().decode("utf-8")
@@ -146,7 +149,14 @@ class RAGClient:
     # ── parsing ────────────────────────────────────────────────────────────
 
     def _parse_response(self, raw: Dict[str, Any]) -> List[RetrievalResult]:
-        items = raw.get("results", raw.get("data", []))
+        # Knowledge 服务返回 {code, msg, data: {results: [...]}}
+        data = raw.get("data", {})
+        if isinstance(data, dict):
+            items = data.get("results", [])
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
         docs: List[RetrievalResult] = []
         for item in items:
             docs.append(RetrievalResult(

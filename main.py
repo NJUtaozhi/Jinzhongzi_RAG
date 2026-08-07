@@ -14,26 +14,39 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import re
+import shutil
 import sys
+import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
-import json
-import shutil
-import tempfile
-import uuid
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # 最优先加载 .env
 load_dotenv()
 
+# ── 日志 ────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("agent_service")
+
 from orchestration import get_orchestrator  # noqa: E402
+from orchestration.state import default_state  # noqa: E402
 
 # ── Request / Response models ────────────────────────────────────────────────
 
@@ -69,6 +82,10 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
     services: dict = Field(default_factory=lambda: {
+        "multimodal": os.getenv("MULTIMODAL_BASE_URL", "http://localhost:8001"),
+        "rag": os.getenv("RAG_BASE_URL", "http://localhost:8002"),
+    })
+    dependencies: dict = Field(default_factory=lambda: {
         "multimodal": os.getenv("MULTIMODAL_BASE_URL", "http://localhost:8001"),
         "rag": os.getenv("RAG_BASE_URL", "http://localhost:8002"),
     })
@@ -125,6 +142,7 @@ async def chat(req: ChatRequest):
 
     完整链路: perceive → understand → retrieve → reason → safety → respond
     """
+    t_start = time.time()
     try:
         orch = get_orch()
         result = orch.run(
@@ -136,6 +154,16 @@ async def chat(req: ChatRequest):
             max_iterations=req.max_iterations,
         )
 
+        elapsed = time.time() - t_start
+        logger.info(
+            "chat session=%s intent=%s emotion=%s elapsed=%.2fs trace_nodes=%d",
+            req.session_id,
+            result.get("user_intent", ""),
+            result.get("emotion_label", ""),
+            elapsed,
+            len(result.get("react_trace", [])),
+        )
+
         return ChatResponse(
             answer=result.get("final_answer", "(无回应)"),
             status=result.get("status", "failed"),
@@ -145,14 +173,123 @@ async def chat(req: ChatRequest):
             session_id=req.session_id,
         )
     except Exception as exc:
+        elapsed = time.time() - t_start
+        logger.error(
+            "chat session=%s error=%s elapsed=%.2fs",
+            req.session_id, exc, elapsed,
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/chat/stream", tags=["对话"])
 async def chat_stream(req: ChatRequest):
-    """流式对话 (SSE) — 暂未实现, 保留接口."""
-    # TODO: 实现 SSE 流式输出
-    raise HTTPException(status_code=501, detail="流式接口开发中")
+    """流式对话 (SSE).
+
+    使用 LangGraph astream 逐节点推送状态更新,
+    respond 节点完成后将 final_answer 按句子分块推送.
+    """
+    async def event_generator():
+        t_start = time.time()
+        orch = get_orch()
+
+        # 构建初始状态 (与 orch.run 保持一致)
+        state = default_state(
+            user_query=req.query,
+            session_id=req.session_id,
+            max_iterations=req.max_iterations,
+        )
+        if req.history:
+            state["conversation_history"] = req.history
+        state["runtime_context"] = {  # type: ignore[typeddict-unknown-key]
+            "image_path": req.image_path,
+            "audio_path": req.audio_path,
+        }
+
+        try:
+            async for chunk in orch.graph.astream(state, stream_mode="values"):
+                status = chunk.get("status", "")
+                trace = chunk.get("react_trace", [])
+                # 只推送最近 2 条 ReAct 轨迹
+                recent_trace = trace[-2:] if trace else []
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "status",
+                            "status": status,
+                            "trace": recent_trace,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+
+                if status == "completed":
+                    final = chunk.get("final_answer", "")
+                    emotion = chunk.get("emotion_label", "")
+                    intent = chunk.get("user_intent", "")
+
+                    # 按句子分块推送最终回复
+                    sentences = re.split(r"(?<=[。！？.!?])", final)
+                    for sent in sentences:
+                        stripped = sent.strip()
+                        if stripped:
+                            yield (
+                                "data: "
+                                + json.dumps(
+                                    {"type": "reply_chunk", "content": stripped},
+                                    ensure_ascii=False,
+                                )
+                                + "\n\n"
+                            )
+
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "done",
+                                "emotion": emotion,
+                                "intent": intent,
+                                "session_id": req.session_id,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+
+                    elapsed = time.time() - t_start
+                    logger.info(
+                        "chat_stream session=%s intent=%s emotion=%s elapsed=%.2fs trace_nodes=%d",
+                        req.session_id, intent, emotion, elapsed,
+                        len(trace),
+                    )
+                    break
+
+        except Exception as exc:
+            elapsed = time.time() - t_start
+            logger.error(
+                "chat_stream session=%s error=%s elapsed=%.2fs",
+                req.session_id, exc, elapsed,
+            )
+            yield (
+                "data: "
+                + json.dumps(
+                    {"type": "error", "message": str(exc)},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/v1/agent/analyze", tags=["兼容"])
@@ -179,6 +316,7 @@ async def agent_analyze(
         except Exception:
             pass
 
+    t_start = time.time()
     try:
         orch = get_orch()
         result = orch.run(
@@ -188,6 +326,13 @@ async def agent_analyze(
             image_path=image_path,
             audio_path=None,
             max_iterations=8,
+        )
+
+        elapsed = time.time() - t_start
+        logger.info(
+            "analyze user_id=%s intent=%s emotion=%s elapsed=%.2fs",
+            user_id, result.get("user_intent", ""),
+            result.get("emotion_label", ""), elapsed,
         )
 
         # 提取情绪信息
@@ -213,6 +358,11 @@ async def agent_analyze(
             },
         }
     except Exception as exc:
+        elapsed = time.time() - t_start
+        logger.error(
+            "analyze user_id=%s error=%s elapsed=%.2fs",
+            user_id, exc, elapsed,
+        )
         return JSONResponse(
             status_code=500,
             content={
@@ -235,9 +385,9 @@ if __name__ == "__main__":
     host = os.getenv("AGENT_HOST", "0.0.0.0")
     port = int(os.getenv("AGENT_PORT", "8003"))
 
-    print(f"🚀 心理健康辅导 Agent 启动中...")
-    print(f"   📍 http://{host}:{port}")
-    print(f"   📖 API 文档: http://{host}:{port}/docs")
-    print(f"   🏥 健康检查: http://{host}:{port}/health")
+    logger.info("心理健康辅导 Agent 启动中...")
+    logger.info("  http://%s:%s", host, port)
+    logger.info("  API 文档: http://%s:%s/docs", host, port)
+    logger.info("  健康检查: http://%s:%s/health", host, port)
 
     uvicorn.run(app, host=host, port=port, log_level="info")

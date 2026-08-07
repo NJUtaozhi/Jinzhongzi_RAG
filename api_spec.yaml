@@ -38,7 +38,6 @@
                   }
                 },
                 "required": [
-                  "image",
                   "text"
                 ]
               },
@@ -158,6 +157,148 @@
           "400": {
             "$ref": "#/components/responses/参数缺失",
             "description": "请求参数不全"
+          }
+        },
+        "security": []
+      }
+    },
+    "/chat": {
+      "post": {
+        "summary": "单轮心理健康辅导对话（JSON）",
+        "deprecated": false,
+        "description": "纯文本对话入口，返回完整 JSON 响应。带图请求请走 /v1/agent/analyze (multipart)。",
+        "tags": [],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "用户输入文本",
+                    "minLength": 1
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "description": "会话 ID（多轮对话追踪）",
+                    "default": "default"
+                  },
+                  "history": {
+                    "type": "array",
+                    "description": "对话历史",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "role": {
+                          "type": "string",
+                          "enum": ["user", "assistant"]
+                        },
+                        "content": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "image_path": {
+                    "type": "string",
+                    "description": "可选：面部图像文件路径"
+                  },
+                  "max_iterations": {
+                    "type": "integer",
+                    "description": "ReAct 最大迭代次数",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 8
+                  }
+                },
+                "required": ["query"]
+              },
+              "example": {
+                "query": "我最近总是睡不着，一闭眼就想很多事",
+                "session_id": "user-001",
+                "history": [],
+                "max_iterations": 8
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "对话成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "answer": {
+                      "type": "string",
+                      "description": "Agent 最终回复"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["completed", "failed"]
+                    },
+                    "intent": {
+                      "type": "string",
+                      "description": "识别的用户意图"
+                    },
+                    "emotion": {
+                      "type": "string",
+                      "description": "识别的情绪标签"
+                    },
+                    "react_trace": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "ReAct 审计轨迹"
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "description": "会话 ID"
+                    }
+                  },
+                  "required": ["answer", "status", "intent", "emotion", "react_trace", "session_id"]
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/chat/stream": {
+      "post": {
+        "summary": "流式心理健康辅导对话（SSE）",
+        "deprecated": false,
+        "description": "与 /chat 相同语义，但使用 Server-Sent Events 流式推送状态更新和回复分块。",
+        "tags": [],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/paths/~1chat/post/requestBody/content/application~1json/schema"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE 事件流",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "事件类型: status（状态更新）、reply_chunk（回复分块）、done（完成）、error（错误）"
+                },
+                "example": "data: {\"type\":\"status\",\"status\":\"reasoning\",\"trace\":[]}\n\ndata: {\"type\":\"reply_chunk\",\"content\":\"我理解你的感受...\"}\n\ndata: {\"type\":\"done\",\"emotion\":\"anxiety\",\"intent\":\"seeking_emotional_support\"}\n\n"
+              }
+            }
           }
         },
         "security": []

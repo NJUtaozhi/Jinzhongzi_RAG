@@ -29,6 +29,7 @@ from codecs import encode
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -173,13 +174,15 @@ class MultimodalClient:
 
     def _http_post(self, path: str, body: bytes | str, headers: Dict[str, str]) -> Dict[str, Any]:
         """带重试的 HTTP POST."""
+        parsed = urlparse(self._base_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
         last_exc = None
         for attempt in range(self._MAX_RETRIES):
             conn = None
             try:
-                conn = http.client.HTTPConnection(
-                    self._base_url, timeout=self._timeout
-                )
+                conn = http.client.HTTPConnection(host, port, timeout=self._timeout)
                 if isinstance(body, str):
                     body = body.encode("utf-8")
                 conn.request("POST", path, body, headers)
