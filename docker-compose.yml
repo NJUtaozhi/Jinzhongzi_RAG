@@ -17,6 +17,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
 
   knowledge:
     build:
@@ -33,6 +38,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1536M
 
   agent:
     build:
@@ -47,7 +57,6 @@ services:
       - ./services:/app/services
       - ./tools:/app/tools
     environment:
-      # 成员3 代码使用的环境变量名（与 .env.example 对齐）
       - MULTIMODAL_BASE_URL=http://vision:8001
       - RAG_BASE_URL=http://knowledge:8002
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
@@ -65,6 +74,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
 
   frontend:
     build:
@@ -75,11 +89,21 @@ services:
     volumes:
       - ./frontend:/app
     environment:
-      - AGENT_API_URL=http://agent:8003/chat
+      - AGENT_API_URL=http://agent:8003/v1/agent/analyze
     depends_on:
       agent:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
 
 volumes:
   kb_data:

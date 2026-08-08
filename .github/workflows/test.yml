@@ -1,0 +1,33 @@
+# GitHub Actions — 金种子 CI
+# push 到 main 分支时自动运行测试
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: 运行测试
+        run: |
+          python tests/test_pure.py
+          python tests/test_state_machine.py

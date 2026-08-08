@@ -1,9 +1,10 @@
 FROM python:3.10-slim
 
-# OpenFace 依赖（基础系统库）
+# OpenFace 依赖（基础系统库）+ curl（健康检查）
 RUN apt-get update && apt-get install -y \
     libopenblas-dev \
     libgomp1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
