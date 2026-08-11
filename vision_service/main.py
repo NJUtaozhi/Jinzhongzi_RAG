@@ -1,19 +1,65 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 import subprocess
 import csv
 import os
 import uuid
 import shutil
+import logging
+import time
+
+# ---------------------------------------------------------------------------
+# 结构化日志
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("vision_service")
 
 app = FastAPI(title="Vision Analysis Service")
 
-OPENFACE_BIN = r"D:\学习资料\科研类项目\金种子早期科研\openface-venv\OpenFace_2.2.0_win_x64\OpenFace_2.2.0_win_x64\FaceLandmarkImg.exe"
+# ---------------------------------------------------------------------------
+# OpenFace 二进制路径 — 优先从环境变量读取
+# ---------------------------------------------------------------------------
+OPENFACE_BIN = os.environ.get("OPENFACE_BIN", "FaceLandmarkImg.exe")
 
+# ---------------------------------------------------------------------------
+# 启动时检测 OpenFace 是否可用
+# ---------------------------------------------------------------------------
+OPENFACE_AVAILABLE = shutil.which(OPENFACE_BIN) is not None
+if not OPENFACE_AVAILABLE:
+    logger.warning(
+        "OpenFace binary '%s' not found on PATH. Face analysis endpoints will return 503.",
+        OPENFACE_BIN,
+    )
+else:
+    logger.info("OpenFace binary found: %s", shutil.which(OPENFACE_BIN))
+
+# ---------------------------------------------------------------------------
+# 请求耗时中间件
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def log_request_duration(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "%s %s → %s  %.1fms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
+
+# ---------------------------------------------------------------------------
+# AU 名称列表
+# ---------------------------------------------------------------------------
 AU_NAMES = [
     "AU01_r", "AU02_r", "AU04_r", "AU05_r", "AU06_r",
     "AU07_r", "AU09_r", "AU10_r", "AU12_r", "AU14_r",
-    "AU15_r", "AU17_r", "AU20_r", "AU23_r", "AU25_r", "AU26_r", "AU45_r"
+    "AU15_r", "AU17_r", "AU20_r", "AU23_r", "AU25_r", "AU26_r", "AU45_r",
 ]
 
 
@@ -65,7 +111,6 @@ def parse_openface_csv(csv_path):
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f, skipinitialspace=True)
         for row in reader:
-            # OpenFace 2.2.0 输出包含 confidence 列，>0.5 表示检测有效
             try:
                 conf = float(row.get("confidence", 0))
             except (ValueError, TypeError):
@@ -100,7 +145,17 @@ async def analyze_face(image: UploadFile = File(...)):
         }
     }
     """
-    # 创建临时目录
+    # 检查 OpenFace 是否可用
+    if not OPENFACE_AVAILABLE:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": 50003,
+                "msg": "OpenFace 分析引擎未部署，请联系管理员。",
+                "data": None,
+            },
+        )
+
     temp_id = str(uuid.uuid4())[:8]
     temp_dir = os.path.join(os.getcwd(), f"temp_openface_{temp_id}")
     os.makedirs(temp_dir, exist_ok=True)
@@ -111,12 +166,14 @@ async def analyze_face(image: UploadFile = File(...)):
         with open(image_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
 
+        logger.info("Running OpenFace on %s", image_path)
+
         # 调用 OpenFace 命令行工具
         result = subprocess.run(
             [OPENFACE_BIN, "-f", image_path, "-out_dir", temp_dir],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=60,
         )
 
         # 查找输出的 CSV 文件
@@ -127,8 +184,8 @@ async def analyze_face(image: UploadFile = File(...)):
                 content={
                     "code": 40010,
                     "msg": "未检测到人脸，请提供包含清晰正面人脸的图片。",
-                    "data": None
-                }
+                    "data": None,
+                },
             )
 
         csv_path = os.path.join(temp_dir, csv_files[0])
@@ -140,12 +197,13 @@ async def analyze_face(image: UploadFile = File(...)):
                 content={
                     "code": 40010,
                     "msg": "未检测到人脸，请提供包含清晰正面人脸的图片。",
-                    "data": None
-                }
+                    "data": None,
+                },
             )
 
         # 推断情绪
         emotion = infer_emotion(au_dict)
+        logger.info("Detected emotion: %s", emotion)
 
         # 生成提示
         hints = []
@@ -161,28 +219,65 @@ async def analyze_face(image: UploadFile = File(...)):
                 "face_detected": True,
                 "dominant_emotion": emotion,
                 "au_analysis": au_dict,
-                "hint": "；".join(hints) if hints else "面部表情分析完成。"
-            }
+                "hint": "；".join(hints) if hints else "面部表情分析完成。",
+            },
         }
 
+    except FileNotFoundError:
+        # OpenFace 二进制文件在运行时不可用
+        logger.exception("OpenFace binary not found at runtime")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": 40010,
+                "msg": "OpenFace 分析引擎未找到，请检查部署配置。",
+                "data": None,
+            },
+        )
+
     except subprocess.TimeoutExpired:
+        logger.exception("OpenFace analysis timed out")
         return JSONResponse(
             status_code=500,
-            content={"code": 50000, "msg": "OpenFace 分析超时，请重试。", "data": None}
+            content={
+                "code": 50001,
+                "msg": "OpenFace 分析超时，请重试。",
+                "data": None,
+            },
         )
-    except Exception as e:
+
+    except ValueError as e:
+        logger.exception("Invalid value during face analysis")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": 40011,
+                "msg": f"参数或数据格式错误：{str(e)}",
+                "data": None,
+            },
+        )
+
+    except Exception:
+        logger.exception("Unexpected error during face analysis")
         return JSONResponse(
             status_code=500,
-            content={"code": 50000, "msg": f"服务内部错误：{str(e)}", "data": None}
+            content={
+                "code": 50000,
+                "msg": "服务内部错误，请联系管理员。",
+                "data": None,
+            },
         )
+
     finally:
-        # 清理临时文件
         shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.debug("Cleaned up temporary directory: %s", temp_dir)
 
 
 @app.get("/health")
 def health_check():
     """健康检查接口"""
-    return {"status": "ok", "service": "vision-analysis"}
-
-
+    return {
+        "status": "ok",
+        "service": "vision-analysis",
+        "openface_available": OPENFACE_AVAILABLE,
+    }
