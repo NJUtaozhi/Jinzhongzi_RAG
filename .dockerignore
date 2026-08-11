@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# 环境变量（敏感信息）
+.env
+.env.local
+
+# 知识库持久化数据（运行时生成）
+kb_chroma_db/
+
+# 临时文件
+temp_*/
+tmp/
+
+# 测试缓存
+.pytest_cache/
+htmlcov/
+.coverage
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db

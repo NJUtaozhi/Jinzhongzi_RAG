@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
 
-# ===== 初始化（带异常处理）=====
+# ===== 初始化（整合异常处理 + 自动构建）=====
 try:
     logger.info("Loading vector model...")
     model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
@@ -35,6 +35,25 @@ try:
     
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
+    
+    # ===== 采纳远程的自动构建逻辑 =====
+    if collection.count() == 0:
+        logger.info("Knowledge base is empty, auto-building...")
+        try:
+            KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
+            with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            if lines:
+                ids = [f"doc_{i+1}" for i in range(len(lines))]
+                embeddings = [model.encode(text).tolist() for text in lines]
+                collection.add(documents=lines, ids=ids, embeddings=embeddings)
+                logger.info(f"Auto-built: {collection.count()} records.")
+            else:
+                logger.warning("knowledge_data.txt is empty, no records added.")
+        except FileNotFoundError:
+            logger.error("knowledge_data.txt not found! Auto-build skipped.")
+        except Exception as e:
+            logger.error(f"Auto-build failed: {str(e)}")
     
 except Exception as e:
     logger.error(f"Service initialization failed: {str(e)}")
