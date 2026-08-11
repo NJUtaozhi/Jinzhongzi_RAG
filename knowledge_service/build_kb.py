@@ -1,24 +1,26 @@
-﻿# build_kb.py
-import os
+﻿import os
+from pathlib import Path
+
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 
+# 获取当前文件所在目录的绝对路径
+BASE_DIR = Path(__file__).parent.absolute()
+KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
+KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
+
 print("Loading vector model...")
 model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
-chroma_client = chromadb.PersistentClient(path="./kb_chroma_db")
+chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
 
 # 删除旧 collection（如果存在），确保重新创建
 try:
     chroma_client.delete_collection("mental_health_knowledge")
     print("Existing collection deleted.")
-except ValueError:
-    # collection 不存在，无需删除，直接继续
-    pass
 except Exception as e:
-    # 捕获其他可能的异常，例如 NotFoundError
     print(f"Collection not found or already deleted: {e}")
 
 # 创建新的 collection
@@ -28,7 +30,8 @@ collection = chroma_client.create_collection(
     embedding_function=None
 )
 
-with open("knowledge_data.txt", "r", encoding="utf-8") as f:
+# 读取知识语料（使用绝对路径）
+with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
     lines = [line.strip() for line in f if line.strip()]
 
 print(f"Read {len(lines)} knowledge entries.")
