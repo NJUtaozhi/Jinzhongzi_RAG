@@ -4,8 +4,13 @@
 
 对接真实 Agent API (成员3 的 Jinzhongzi_RAG 服务)
 支持：多轮对话、历史记录、情绪变化曲线、图片上传
+
+路由逻辑：
+- 纯文本对话 → POST /v1/agent/chat (JSON, 更快)
+- 带图片对话 → POST /v1/agent/analyze (multipart, 多模态)
 """
 
+import os
 import streamlit as st
 import requests
 import plotly.express as px
@@ -16,14 +21,34 @@ import json
 # ============================================================
 # 配置区
 # ============================================================
-AGENT_API_URL = "http://101.34.68.33:8003/v1/agent/analyze"  # 成员3的接口地址
+AGENT_API_URL = os.environ.get(
+    "AGENT_API_URL",
+    "http://localhost:8003/v1/agent/analyze"  # 成员3的接口地址
+)
 
-# 情绪分数映射
+# 从 AGENT_API_URL 推导其他端点
+_BASE_URL = AGENT_API_URL.replace("/v1/agent/analyze", "")
+CHAT_API_URL = os.environ.get("AGENT_CHAT_URL", f"{_BASE_URL}/v1/agent/chat")
+HEALTH_CHECK_URL = f"{_BASE_URL}/health"
+
+# 情绪分数映射（覆盖 8+ 标签）
 SENTIMENT_SCORE_MAP = {
+    # 原有 4 标签
     "positive": 3,
     "neutral": 2,
     "mixed": 1.5,
     "negative": 1,
+    # 扩展标签
+    "happiness": 3,
+    "joy": 3,
+    "calm": 2.5,
+    "surprise": 2,
+    "sadness": 1,
+    "anger": 0.8,
+    "fear": 0.5,
+    "anxiety": 0.5,
+    "depression": 0.3,
+    "disgust": 0.5,
 }
 
 # ============================================================
@@ -63,8 +88,8 @@ with st.sidebar:
         )
         fig.update_yaxes(
             range=[0, 4],
-            tickvals=[1, 1.5, 2, 3],
-            ticktext=["负面", "混合", "中性", "正面"],
+            tickvals=list(SENTIMENT_SCORE_MAP.values()),
+            ticktext=list(SENTIMENT_SCORE_MAP.keys()),
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -80,9 +105,11 @@ with st.sidebar:
 # 后端健康检查
 # ============================================================
 try:
-    health = requests.get(f"{AGENT_API_URL.replace('/v1/agent/analyze', '')}/health", timeout=3)
+    health = requests.get(HEALTH_CHECK_URL, timeout=3)
     if health.status_code == 200:
-        deps = health.json().get("dependencies", {})
+        health_json = health.json()
+        # 兼容两种返回格式：services 或 dependencies
+        deps = health_json.get("services", health_json.get("dependencies", {}))
         st.caption(
             f"🟢 系统在线 | 面部分析: {'🟢' if deps.get('vision_service') == 'online' else '🔴'} | "
             f"知识检索: {'🟢' if deps.get('knowledge_service') == 'online' else '🔴'}"
@@ -176,19 +203,29 @@ if user_text:
     st.session_state.messages.append(user_msg)
 
     # 2. 调用 Agent API
+    # 路由：有图片走 /v1/agent/analyze (multipart)，纯文本走 /v1/agent/chat (JSON)
     with st.spinner("正在分析中..."):
         try:
-            files = {}
-            data = {"text": user_text}
-
             if uploaded_image:
-                files["image"] = (
-                    uploaded_image.name,
-                    uploaded_image.getvalue(),
-                    uploaded_image.type,
+                # --- 多模态模式：multipart ---
+                files = {
+                    "image": (
+                        uploaded_image.name,
+                        uploaded_image.getvalue(),
+                        uploaded_image.type,
+                    )
+                }
+                data = {"text": user_text}
+                resp = requests.post(AGENT_API_URL, data=data, files=files, timeout=60)
+            else:
+                # --- 纯文本模式：JSON ---
+                payload = {"text": user_text}
+                resp = requests.post(
+                    CHAT_API_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60,
                 )
-
-            resp = requests.post(AGENT_API_URL, data=data, files=files, timeout=60)
 
             if resp.status_code == 200:
                 result = resp.json()
