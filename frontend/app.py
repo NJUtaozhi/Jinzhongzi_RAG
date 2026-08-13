@@ -31,6 +31,9 @@ _BASE_URL = AGENT_API_URL.replace("/v1/agent/analyze", "")
 CHAT_API_URL = os.environ.get("AGENT_CHAT_URL", f"{_BASE_URL}/v1/agent/chat")
 HEALTH_CHECK_URL = f"{_BASE_URL}/health"
 
+# 调试开关：仅 DEBUG=true 时展示内部 API 地址
+DEBUG = os.environ.get("DEBUG", "false").lower() in ("1", "true", "yes")
+
 # 情绪分数映射（覆盖 8+ 标签）
 SENTIMENT_SCORE_MAP = {
     # 原有 4 标签
@@ -79,7 +82,7 @@ with st.sidebar:
 
     if st.session_state.mood_history:
         df = pd.DataFrame(st.session_state.mood_history)
-        df["score"] = df["sentiment"].map(SENTIMENT_SCORE_MAP)
+        df["score"] = df["sentiment"].map(SENTIMENT_SCORE_MAP).fillna(2)
 
         fig = px.line(
             df, x="time", y="score", markers=True,
@@ -88,8 +91,8 @@ with st.sidebar:
         )
         fig.update_yaxes(
             range=[0, 4],
-            tickvals=list(SENTIMENT_SCORE_MAP.values()),
-            ticktext=list(SENTIMENT_SCORE_MAP.keys()),
+            tickvals=[1, 1.5, 2, 3],
+            ticktext=["负面", "混合", "中性", "正面"],
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -103,16 +106,27 @@ with st.sidebar:
 
 # ============================================================
 # 后端健康检查
+# Agent /health 返回 {services: {multimodal: url, rag: url}}，
+# 真实探测各服务 /health 端点判断在线状态（Docker 容器间用服务名互通）
 # ============================================================
 try:
     health = requests.get(HEALTH_CHECK_URL, timeout=3)
     if health.status_code == 200:
         health_json = health.json()
-        # 兼容两种返回格式：services 或 dependencies
-        deps = health_json.get("services", health_json.get("dependencies", {}))
+        services = health_json.get("services", health_json.get("dependencies", {}))
+
+        def _probe(base_url: str, timeout: float = 3) -> bool:
+            """探测下游服务 /health，200 即在线。"""
+            try:
+                return requests.get(f"{base_url}/health", timeout=timeout).status_code == 200
+            except Exception:
+                return False
+
+        vision_ok = _probe(services.get("multimodal", "http://localhost:8001"))
+        knowledge_ok = _probe(services.get("rag", "http://localhost:8002"))
         st.caption(
-            f"🟢 系统在线 | 面部分析: {'🟢' if deps.get('vision_service') == 'online' else '🔴'} | "
-            f"知识检索: {'🟢' if deps.get('knowledge_service') == 'online' else '🔴'}"
+            f"🟢 系统在线 | 面部分析: {'🟢' if vision_ok else '🔴'} | "
+            f"知识检索: {'🟢' if knowledge_ok else '🔴'}"
         )
     else:
         st.caption("🔴 后端服务异常")
@@ -260,4 +274,5 @@ if user_text:
 # 底部状态栏
 # ============================================================
 st.divider()
-st.caption(f"Agent API: {AGENT_API_URL}")
+if DEBUG:
+    st.caption(f"Agent API: {AGENT_API_URL}")

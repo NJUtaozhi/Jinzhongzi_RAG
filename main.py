@@ -76,6 +76,13 @@ class ChatResponse(BaseModel):
     session_id: str = Field(default="", description="会话 ID")
 
 
+class FrontendChatRequest(BaseModel):
+    """前端纯文本对话请求 (兼容路由 /v1/agent/chat)."""
+
+    text: str = Field(..., description="用户输入文本", min_length=1)
+    user_id: str = Field(default=None, description="可选: 用户ID")
+
+
 class HealthResponse(BaseModel):
     """健康检查响应."""
 
@@ -352,7 +359,7 @@ async def agent_analyze(
                     "text_sentiment": result.get("emotion_label", "neutral"),
                     "text_keywords": [],
                 },
-                "decision": result.get("intent", "neutral"),
+                "decision": result.get("user_intent", "unclear"),
                 "reply": result.get("final_answer", ""),
                 "advice_source": "Agent 综合分析",
             },
@@ -375,6 +382,61 @@ async def agent_analyze(
         # 清理临时图片
         if image_path and os.path.exists(os.path.dirname(image_path)):
             shutil.rmtree(os.path.dirname(image_path), ignore_errors=True)
+
+
+@app.post("/v1/agent/chat", tags=["兼容"])
+async def agent_chat(req: FrontendChatRequest):
+    """兼容成员4前端的 /v1/agent/chat 路由 (纯文本 JSON).
+
+    接收 {"text": "..."}，返回与 /v1/agent/analyze 一致的 {code, msg, data} 结构。
+    """
+    t_start = time.time()
+    try:
+        orch = get_orch()
+        result = orch.run(
+            user_query=req.text,
+            session_id=req.user_id or str(uuid.uuid4())[:8],
+            conversation_history=None,
+            image_path=None,
+            audio_path=None,
+            max_iterations=8,
+        )
+
+        elapsed = time.time() - t_start
+        logger.info(
+            "chat_compat user_id=%s intent=%s emotion=%s elapsed=%.2fs",
+            req.user_id, result.get("user_intent", ""),
+            result.get("emotion_label", ""), elapsed,
+        )
+
+        return {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "analysis": {
+                    "image_emotion": {},
+                    "text_sentiment": result.get("emotion_label", "neutral"),
+                    "text_keywords": [],
+                },
+                "decision": result.get("user_intent", "unclear"),
+                "reply": result.get("final_answer", ""),
+                "advice_source": "Agent 综合分析",
+            },
+        }
+    except Exception as exc:
+        elapsed = time.time() - t_start
+        logger.error(
+            "chat_compat user_id=%s error=%s elapsed=%.2fs",
+            req.user_id, exc, elapsed,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 50000,
+                "msg": f"Agent 服务内部错误: {str(exc)}",
+                "data": None,
+            },
+        )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
