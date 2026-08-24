@@ -7,7 +7,7 @@ WORKDIR /app
 
 # 使用成员3的完整依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple
 
 # 复制 Agent 服务代码（成员3：根目录结构）
 COPY main.py /app/

@@ -32,6 +32,11 @@ services:
     volumes:
       - ./knowledge_service:/app
       - kb_data:/app/kb_chroma_db
+      # 向量模型缓存持久化（HuggingFace 在国内不可达，缓存需跨容器重建保留）
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      # 向量模型使用预置缓存，禁止访问 HuggingFace（国内网络不可达）
+      - HF_HUB_OFFLINE=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -107,3 +112,4 @@ services:
 
 volumes:
   kb_data:
+  hf_cache:

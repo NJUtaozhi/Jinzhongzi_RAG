@@ -171,7 +171,7 @@ async def retrieve_knowledge(req: RetrieveRequest):
         return {
             "code": 200,
             "msg": "success",
-            "results": items
+            "data": {"results": items}
         }
         
     except Exception as e:
