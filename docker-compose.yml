@@ -1,7 +1,6 @@
-version: "3.8"
-
 services:
   vision:
+    image: jinzhongzi/openface-vision:2.2.0
     build:
       context: .
       dockerfile: docker/vision/Dockerfile
@@ -10,18 +9,21 @@ services:
     volumes:
       - ./vision_service:/app
     environment:
-      - OPENFACE_BIN=FaceLandmarkImg.exe
+      - OPENFACE_BIN=/opt/OpenFace/build/bin/FaceLandmarkImg
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          cpus: '2.0'
+          memory: 3G
 
   knowledge:
     build:
@@ -43,6 +45,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 180s
     deploy:
       resources:
         limits:
@@ -61,6 +64,7 @@ services:
       - ./orchestration:/app/orchestration
       - ./services:/app/services
       - ./tools:/app/tools
+      - ./assessment.py:/app/assessment.py
     environment:
       - MULTIMODAL_BASE_URL=http://vision:8001
       - RAG_BASE_URL=http://knowledge:8002
@@ -79,11 +83,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 512M
+          cpus: '1.0'
+          memory: 1G
 
   frontend:
     build:
@@ -104,6 +109,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:

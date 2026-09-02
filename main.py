@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import List, Optional
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
@@ -32,6 +33,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from assessment import normalize_assessment
 
 # 最优先加载 .env
 load_dotenv()
@@ -62,6 +65,10 @@ class ChatRequest(BaseModel):
     )
     image_path: Optional[str] = Field(default=None, description="可选: 面部图像文件路径")
     audio_path: Optional[str] = Field(default=None, description="可选: 语音文件路径")
+    assessment: Optional[dict] = Field(
+        default=None,
+        description="可选: {scale, total_score, severity, item9_score}",
+    )
     max_iterations: int = Field(default=8, ge=1, le=20, description="ReAct 最大迭代次数")
 
 
@@ -74,6 +81,8 @@ class ChatResponse(BaseModel):
     emotion: str = Field(default="", description="识别的情绪标签")
     react_trace: List[str] = Field(default_factory=list, description="ReAct 审计轨迹")
     session_id: str = Field(default="", description="会话 ID")
+    assessment: Optional[dict] = Field(default=None, description="标准化量表结果")
+    crisis_risk: bool = Field(default=False, description="是否触发高风险转介")
 
 
 class FrontendChatRequest(BaseModel):
@@ -81,6 +90,10 @@ class FrontendChatRequest(BaseModel):
 
     text: str = Field(..., description="用户输入文本", min_length=1)
     user_id: str = Field(default=None, description="可选: 用户ID")
+    assessment: Optional[dict] = Field(
+        default=None,
+        description="可选: {scale, total_score, severity, item9_score}",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -92,10 +105,7 @@ class HealthResponse(BaseModel):
         "multimodal": os.getenv("MULTIMODAL_BASE_URL", "http://localhost:8001"),
         "rag": os.getenv("RAG_BASE_URL", "http://localhost:8002"),
     })
-    dependencies: dict = Field(default_factory=lambda: {
-        "multimodal": os.getenv("MULTIMODAL_BASE_URL", "http://localhost:8001"),
-        "rag": os.getenv("RAG_BASE_URL", "http://localhost:8002"),
-    })
+    dependencies: dict = Field(default_factory=dict)
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -120,6 +130,26 @@ app.add_middleware(
 _orchestrator = None
 
 
+def dependency_status(base_url: str) -> str:
+    try:
+        with urlopen(f"{base_url.rstrip('/')}/health", timeout=2) as response:
+            return "online" if 200 <= response.status < 300 else "offline"
+    except Exception:
+        return "offline"
+
+
+def health_payload() -> HealthResponse:
+    vision_url = os.getenv("MULTIMODAL_BASE_URL", "http://localhost:8001")
+    rag_url = os.getenv("RAG_BASE_URL", "http://localhost:8002")
+    return HealthResponse(
+        services={"multimodal": vision_url, "rag": rag_url},
+        dependencies={
+            "vision_service": dependency_status(vision_url),
+            "knowledge_service": dependency_status(rag_url),
+        },
+    )
+
+
 def get_orch():
     global _orchestrator
     if _orchestrator is None:
@@ -134,13 +164,13 @@ def get_orch():
 @app.get("/", response_model=HealthResponse, tags=["系统"])
 async def root():
     """根路径 — 健康检查."""
-    return HealthResponse()
+    return health_payload()
 
 
 @app.get("/health", response_model=HealthResponse, tags=["系统"])
 async def health_check():
     """健康检查."""
-    return HealthResponse()
+    return health_payload()
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["对话"])
@@ -158,6 +188,7 @@ async def chat(req: ChatRequest):
             conversation_history=req.history if req.history else None,
             image_path=req.image_path,
             audio_path=req.audio_path,
+            assessment=normalize_assessment(req.assessment),
             max_iterations=req.max_iterations,
         )
 
@@ -178,6 +209,8 @@ async def chat(req: ChatRequest):
             emotion=result.get("emotion_label", ""),
             react_trace=result.get("react_trace", []),
             session_id=req.session_id,
+            assessment=result.get("assessment") or None,
+            crisis_risk=bool(result.get("crisis_risk", False)),
         )
     except Exception as exc:
         elapsed = time.time() - t_start
@@ -210,6 +243,7 @@ async def chat_stream(req: ChatRequest):
         state["runtime_context"] = {  # type: ignore[typeddict-unknown-key]
             "image_path": req.image_path,
             "audio_path": req.audio_path,
+            "assessment": normalize_assessment(req.assessment),
         }
 
         try:
@@ -304,12 +338,23 @@ async def agent_analyze(
     text: str = Form(..., description="用户输入文本"),
     image: UploadFile = File(None, description="可选: 面部图片"),
     user_id: str = Form(None, description="可选: 用户ID"),
+    assessment: str = Form(None, description="可选: JSON 格式 PHQ-9/GAD-7 结果"),
 ):
     """兼容成员4前端的 /v1/agent/analyze 路由.
 
     接收 multipart/form-data (text + image),
     转换为内部 /chat 格式调用, 返回前端期望的 {code, msg, data} 结构.
     """
+    try:
+        assessment_data = normalize_assessment(
+            json.loads(assessment) if assessment else None
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"code": 40002, "msg": f"量表数据格式错误: {exc}", "data": None},
+        )
+
     # 处理图片: 保存到临时文件, 获取路径
     image_path = None
     if image and image.filename:
@@ -332,6 +377,7 @@ async def agent_analyze(
             conversation_history=None,
             image_path=image_path,
             audio_path=None,
+            assessment=assessment_data,
             max_iterations=8,
         )
 
@@ -343,11 +389,26 @@ async def agent_analyze(
         )
 
         # 提取情绪信息
+        emotion_features = result.get("emotion_features", {}) or {}
+        facial_au = emotion_features.get("facial_au", {}) or {}
+        face_errors = emotion_features.get("error_modalities", {}) or {}
+        face_available = "face" in (emotion_features.get("available_modalities", []) or [])
         image_emotion_data = {
-            "dominant_emotion": result.get("emotion_label", "unknown"),
-            "au12_r_smile_intensity": 0,
-            "au04_r_brow_lower": 0,
+            "dominant_emotion": emotion_features.get("facial_expression") or "unknown",
+            "au12_r_smile_intensity": float(facial_au.get("AU12_r", 0.0)),
+            "au04_r_brow_lower": float(facial_au.get("AU04_r", 0.0)),
+            "au_analysis": facial_au,
+            "analysis_available": face_available and not bool(face_errors.get("face")),
         }
+        if face_errors.get("face"):
+            image_emotion_data["error"] = face_errors["face"]
+
+        sources = []
+        for document in result.get("retrieved_docs", []) or []:
+            source = str(document.get("source", "")).strip()
+            if source and source not in sources:
+                sources.append(source)
+        advice_source = "；".join(sources) if sources else "未检索到知识来源"
 
         # 组装前端期望格式
         return {
@@ -361,7 +422,10 @@ async def agent_analyze(
                 },
                 "decision": result.get("user_intent", "unclear"),
                 "reply": result.get("final_answer", ""),
-                "advice_source": "Agent 综合分析",
+                "advice_source": advice_source,
+                "assessment": result.get("assessment") or None,
+                "crisis_risk": bool(result.get("crisis_risk", False)),
+                "crisis_reasons": result.get("crisis_reasons", []),
             },
         }
     except Exception as exc:
@@ -399,6 +463,7 @@ async def agent_chat(req: FrontendChatRequest):
             conversation_history=None,
             image_path=None,
             audio_path=None,
+            assessment=normalize_assessment(req.assessment),
             max_iterations=8,
         )
 
@@ -421,6 +486,9 @@ async def agent_chat(req: FrontendChatRequest):
                 "decision": result.get("user_intent", "unclear"),
                 "reply": result.get("final_answer", ""),
                 "advice_source": "Agent 综合分析",
+                "assessment": result.get("assessment") or None,
+                "crisis_risk": bool(result.get("crisis_risk", False)),
+                "crisis_reasons": result.get("crisis_reasons", []),
             },
         }
     except Exception as exc:

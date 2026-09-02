@@ -10,6 +10,7 @@ import csv
 import tempfile
 import shutil
 from unittest.mock import patch, MagicMock
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -155,3 +156,63 @@ def test_openface_bin_env_var(monkeypatch):
     # 直接验证取值逻辑
     expected = os.environ.get("OPENFACE_BIN_TEST", "FaceLandmarkImg.exe")
     assert expected == "FaceLandmarkImg.exe"
+
+
+def test_real_au_contract_with_mocked_openface(monkeypatch):
+    """Vision endpoint must expose actual CSV AU values, not placeholders."""
+    import main
+
+    def fake_run(command, **kwargs):
+        output_dir = command[command.index("-out_dir") + 1]
+        csv_path = os.path.join(output_dir, "input.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["confidence"] + main.AU_NAMES)
+            writer.writeheader()
+            row = {name: "0.2" for name in main.AU_NAMES}
+            row.update({"confidence": "0.98", "AU06_r": "1.1", "AU12_r": "2.4"})
+            writer.writerow(row)
+        return MagicMock(returncode=0, stderr="", stdout="ok")
+
+    monkeypatch.setattr(main, "OPENFACE_AVAILABLE", True)
+    monkeypatch.setattr(main, "OPENFACE_RESOLVED", sys.executable)
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    started = time.perf_counter()
+    response = TestClient(main.app).post(
+        "/v1/vision/analyze-face",
+        files={"image": ("face.jpg", b"fake-image", "image/jpeg")},
+    )
+    assert time.perf_counter() - started < 10
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["au_analysis"]["AU12_r"] == 2.4
+    assert data["dominant_emotion"] == "happiness"
+
+
+def test_no_face_returns_40010_without_crash(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "OPENFACE_AVAILABLE", True)
+    monkeypatch.setattr(main, "OPENFACE_RESOLVED", sys.executable)
+    monkeypatch.setattr(
+        main.subprocess,
+        "run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stderr="", stdout="ok"),
+    )
+    response = TestClient(main.app).post(
+        "/v1/vision/analyze-face",
+        files={"image": ("blank.jpg", b"not-a-face", "image/jpeg")},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == 40010
+
+
+def test_text_sentiment_compatibility_route():
+    import main
+
+    response = TestClient(main.app).post(
+        "/v1/text/analyze-sentiment",
+        json={"text": "最近失眠而且很焦虑"},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["sentiment"] == "negative"

@@ -188,7 +188,11 @@ class MultimodalClient:
                 conn.request("POST", path, body, headers)
                 res = conn.getresponse()
                 data = res.read().decode("utf-8")
-                return json.loads(data)
+                parsed_data = json.loads(data)
+                if res.status < 200 or res.status >= 300:
+                    message = parsed_data.get("msg", data) if isinstance(parsed_data, dict) else data
+                    raise RuntimeError(f"HTTP {res.status}: {message}")
+                return parsed_data
             except (ConnectionRefusedError, ConnectionResetError,
                     OSError, http.client.HTTPException) as exc:
                 last_exc = exc
@@ -208,11 +212,13 @@ class MultimodalClient:
     # ── per-modality calls ────────────────────────────────────────────────
 
     def _analyze_text(self, text: str) -> Dict[str, Any]:
-        return self._http_post(
+        raw = self._http_post(
             self._text_path,
             json.dumps({"text": text}),
             {"Content-Type": "application/json"},
         )
+        data = raw.get("data", raw) if isinstance(raw, dict) else {}
+        return data if isinstance(data, dict) else {}
 
     def _analyze_face(self, image_path: Path) -> Dict[str, Any]:
         boundary = "wL36Yn8afVp8Ag7AmP8qZ0SA4n1v9T"
@@ -235,11 +241,20 @@ class MultimodalClient:
         data_parts.append(encode(""))
         body = b"\r\n".join(data_parts)
 
-        return self._http_post(
+        raw = self._http_post(
             self._vision_path,
             body,
             {"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
+        data = raw.get("data", raw) if isinstance(raw, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "action_units": data.get("au_analysis", data.get("action_units", {})),
+            "expression": data.get("dominant_emotion", data.get("expression", "")),
+            "valence": data.get("valence"),
+            "arousal": data.get("arousal"),
+        }
 
     def _analyze_voice(self, audio_path: Path) -> Dict[str, Any]:
         boundary = "audioBoundary12345"

@@ -174,6 +174,25 @@ Docker 环境:  http://agent:8003 + /v1/agent/analyze → http://agent:8003/v1/a
 
 详细请求/响应 Schema 见 `api_spec.yaml`（OpenAPI 3.0 格式）。
 
+### 4.1 Week 6 量表字段
+
+`/chat` 在 JSON 请求中直接接收对象；`/v1/agent/analyze` 因使用 multipart，接收同一对象的 JSON 字符串：
+
+```json
+{
+  "scale": "PHQ-9",
+  "total_score": 12,
+  "severity": "中度抑郁倾向",
+  "item9_score": 0
+}
+```
+
+- `scale` 只允许 `PHQ-9` 或 `GAD-7`。
+- 后端根据 `total_score` 重新计算 `severity`，不信任客户端分级。
+- `item9_score` 仅 PHQ-9 使用；GAD-7 传 `null`。
+- PHQ-9 总分 ≥15 或第 9 题 ≥1 时，确定性触发高风险转介，最终回复必须包含热线与就近就医建议。
+- 量表仅用于筛查，不能替代专业诊断。
+
 ---
 
 ## 5. Docker 部署

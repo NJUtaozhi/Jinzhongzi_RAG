@@ -173,13 +173,13 @@ POST /chat
   "msg": "success",
   "data": {
     "analysis": {
-      "image_emotion": { "dominant_emotion": "happy", "au12_r_smile_intensity": 0, "au04_r_brow_lower": 0 },
+      "image_emotion": { "dominant_emotion": "happiness", "au12_r_smile_intensity": 2.0, "au04_r_brow_lower": 0.41 },
       "text_sentiment": "positive",
       "text_keywords": []
     },
     "decision": "neutral",
     "reply": "你好呀，很高兴你愿意来这里聊聊...",
-    "advice_source": "Agent 综合分析"
+    "advice_source": "Kroenke K, Spitzer RL, Williams JBW. The PHQ-9, 2001"
   }
 }
 ```
@@ -220,3 +220,10 @@ GitHub Actions CI 会在每次 push 到 `main` 分支时自动运行。
 ---
 
 > 💡 从上传自拍 + 输入心情，到面部表情识别、知识库检索、AI 综合分析、情绪曲线可视化，全链路真实跑通。
+
+## Week 6：真实面部分析与心理量表
+
+- Vision 镜像基于 Ubuntu 20.04 编译 OpenFace 2.2.0，容器内路径为 `/opt/OpenFace/build/bin/FaceLandmarkImg`。
+- 前端支持 PHQ-9 和 GAD-7 逐题填写、计分与分级，提交字段为 `assessment` JSON。
+- PHQ-9 总分 ≥15 或第 9 题 ≥1 时，Agent 使用确定性规则触发危机转介，提供 12355、400-161-9995 与就近就医建议。
+- `/v1/agent/analyze` 返回真实 `AU12_r`、`AU04_r`、完整 AU 字典及知识来源，不再使用占位值。

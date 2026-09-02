@@ -59,6 +59,11 @@ class CounselingState(TypedDict, total=False):
     emotion_features: Dict[str, Any]    # EmotionFeatures.to_dict()
     emotion_label: str                  # "anxiety"|"depression"|"neutral"|...
 
+    # ── 标准化心理量表（Week 6）──
+    assessment: Dict[str, Any]           # {scale, total_score, severity, item9_score}
+    crisis_risk: bool                    # PHQ-9 高风险阈值是否触发
+    crisis_reasons: List[str]            # 可审计的确定性触发原因
+
     # ── RAG 检索结果（Block 2）──
     retrieved_docs: List[Dict[str, Any]]   # 原始检索结果列表
     rag_context: str                       # 拼接后的文本, 供 LLM 消费
@@ -107,6 +112,9 @@ def default_state(
         "conversation_history": [],
         "emotion_features": {},
         "emotion_label": "",
+        "assessment": {},
+        "crisis_risk": False,
+        "crisis_reasons": [],
         "retrieved_docs": [],
         "rag_context": "",
         "user_intent": "",

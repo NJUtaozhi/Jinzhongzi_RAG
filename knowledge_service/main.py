@@ -36,24 +36,27 @@ try:
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
     
-    # ===== 采纳远程的自动构建逻辑 =====
-    if collection.count() == 0:
-        logger.info("Knowledge base is empty, auto-building...")
-        try:
-            KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
-            with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            if lines:
-                ids = [f"doc_{i+1}" for i in range(len(lines))]
-                embeddings = [model.encode(text).tolist() for text in lines]
-                collection.add(documents=lines, ids=ids, embeddings=embeddings)
-                logger.info(f"Auto-built: {collection.count()} records.")
-            else:
-                logger.warning("knowledge_data.txt is empty, no records added.")
-        except FileNotFoundError:
-            logger.error("knowledge_data.txt not found! Auto-build skipped.")
-        except Exception as e:
-            logger.error(f"Auto-build failed: {str(e)}")
+    # 持久卷中可能仍是旧版知识库；文件条目变化时主动同步，而不只检查空库。
+    try:
+        KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
+        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        if lines and collection.count() != len(lines):
+            logger.info(
+                "Synchronizing knowledge base: %s -> %s records...",
+                collection.count(),
+                len(lines),
+            )
+            ids = [f"doc_{i+1}" for i in range(len(lines))]
+            embeddings = [model.encode(text).tolist() for text in lines]
+            collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
+            logger.info("Knowledge base synchronized: %s records.", collection.count())
+        elif not lines:
+            logger.warning("knowledge_data.txt is empty, no records added.")
+    except FileNotFoundError:
+        logger.error("knowledge_data.txt not found! Auto-build skipped.")
+    except Exception as e:
+        logger.error("Knowledge synchronization failed: %s", str(e))
     
 except Exception as e:
     logger.error(f"Service initialization failed: {str(e)}")
@@ -83,6 +86,13 @@ def extract_source(text: str) -> str:
     if match:
         return match.group(1).strip()
     return "Mental Health Knowledge Base"
+
+
+def split_source(text: str) -> tuple[str, str]:
+    """拆分正文与行尾来源标签，避免把标记重复显示给前端。"""
+    source = extract_source(text)
+    content = re.sub(r'\s*【来源：[^】]+】\s*$', '', text).strip()
+    return content, source
 
 @app.post("/v1/knowledge/retrieve")
 async def retrieve_knowledge(req: RetrieveRequest):
@@ -155,9 +165,9 @@ async def retrieve_knowledge(req: RetrieveRequest):
         if results.get("documents") and results["documents"][0]:
             for doc, distance in zip(results["documents"][0], results["distances"][0]):
                 similarity = 1 / (1 + distance)
-                source = extract_source(doc)
+                content, source = split_source(doc)
                 items.append({
-                    "content": doc,
+                    "content": content,
                     "source": source,
                     "score": round(similarity, 4)
                 })
