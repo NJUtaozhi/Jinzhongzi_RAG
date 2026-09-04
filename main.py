@@ -158,6 +158,15 @@ def get_orch():
     return _orchestrator
 
 
+def extract_advice_source(result: dict) -> str:
+    sources = []
+    for document in result.get("retrieved_docs", []) or []:
+        source = str(document.get("source", "")).strip()
+        if source and source not in sources:
+            sources.append(source)
+    return "；".join(sources) if sources else "未检索到知识来源"
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
@@ -403,12 +412,7 @@ async def agent_analyze(
         if face_errors.get("face"):
             image_emotion_data["error"] = face_errors["face"]
 
-        sources = []
-        for document in result.get("retrieved_docs", []) or []:
-            source = str(document.get("source", "")).strip()
-            if source and source not in sources:
-                sources.append(source)
-        advice_source = "；".join(sources) if sources else "未检索到知识来源"
+        advice_source = extract_advice_source(result)
 
         # 组装前端期望格式
         return {
@@ -485,7 +489,7 @@ async def agent_chat(req: FrontendChatRequest):
                 },
                 "decision": result.get("user_intent", "unclear"),
                 "reply": result.get("final_answer", ""),
-                "advice_source": "Agent 综合分析",
+                "advice_source": extract_advice_source(result),
                 "assessment": result.get("assessment") or None,
                 "crisis_risk": bool(result.get("crisis_risk", False)),
                 "crisis_reasons": result.get("crisis_reasons", []),
