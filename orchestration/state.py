@@ -59,6 +59,9 @@ class CounselingState(TypedDict, total=False):
     emotion_features: Dict[str, Any]    # EmotionFeatures.to_dict()
     emotion_label: str                  # "anxiety"|"depression"|"neutral"|...
 
+    # ── 运行时上下文（run() 注入；含文件路径等非序列化数据）──
+    runtime_context: Dict[str, Any]      # {image_path, audio_path, assessment}
+
     # ── 标准化心理量表（Week 6）──
     assessment: Dict[str, Any]           # {scale, total_score, severity, item9_score}
     crisis_risk: bool                    # PHQ-9 高风险阈值是否触发
