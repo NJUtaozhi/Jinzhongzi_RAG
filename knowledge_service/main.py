@@ -82,7 +82,7 @@ def extract_source(text: str) -> str:
     从知识条目文本中提取【来源：xxx】标签。
     如果找到，返回来源名称；否则返回默认值。
     """
-    match = re.search(r'【来源：([^】]+)】', text)
+    match = re.search(r'[【\[]来源：([^】\]]+)[】\]]', text)
     if match:
         return match.group(1).strip()
     return "Mental Health Knowledge Base"
