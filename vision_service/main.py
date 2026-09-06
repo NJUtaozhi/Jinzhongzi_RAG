@@ -7,6 +7,8 @@ import uuid
 import shutil
 import logging
 import time
+from pathlib import Path
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # 结构化日志
@@ -27,14 +29,15 @@ OPENFACE_BIN = os.environ.get("OPENFACE_BIN", "FaceLandmarkImg.exe")
 # ---------------------------------------------------------------------------
 # 启动时检测 OpenFace 是否可用
 # ---------------------------------------------------------------------------
-OPENFACE_AVAILABLE = shutil.which(OPENFACE_BIN) is not None
+OPENFACE_RESOLVED = shutil.which(OPENFACE_BIN)
+OPENFACE_AVAILABLE = OPENFACE_RESOLVED is not None
 if not OPENFACE_AVAILABLE:
     logger.warning(
         "OpenFace binary '%s' not found on PATH. Face analysis endpoints will return 503.",
         OPENFACE_BIN,
     )
 else:
-    logger.info("OpenFace binary found: %s", shutil.which(OPENFACE_BIN))
+    logger.info("OpenFace binary found: %s", OPENFACE_RESOLVED)
 
 # ---------------------------------------------------------------------------
 # 请求耗时中间件
@@ -127,6 +130,40 @@ def parse_openface_csv(csv_path):
     return None
 
 
+class TextRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+@app.post("/v1/text/analyze-sentiment")
+async def analyze_text_sentiment(req: TextRequest):
+    """Lightweight local text signal used when the Agent has no model endpoint.
+
+    This is intentionally a transparent keyword baseline, not a clinical model.
+    """
+    text = req.text.strip()
+    negative_terms = ("焦虑", "难过", "失眠", "害怕", "压力", "痛苦", "绝望", "自伤", "轻生")
+    positive_terms = ("开心", "高兴", "轻松", "希望", "感谢", "不错", "幸福")
+    matched_negative = [term for term in negative_terms if term in text]
+    matched_positive = [term for term in positive_terms if term in text]
+    if len(matched_negative) > len(matched_positive):
+        sentiment = "negative"
+    elif len(matched_positive) > len(matched_negative):
+        sentiment = "positive"
+    elif matched_negative or matched_positive:
+        sentiment = "mixed"
+    else:
+        sentiment = "neutral"
+    return {
+        "code": 200,
+        "msg": "success",
+        "data": {
+            "sentiment": sentiment,
+            "emotions": matched_negative + matched_positive,
+            "method": "keyword-baseline",
+        },
+    }
+
+
 @app.post("/v1/vision/analyze-face")
 async def analyze_face(image: UploadFile = File(...)):
     """
@@ -156,13 +193,22 @@ async def analyze_face(image: UploadFile = File(...)):
             },
         )
 
+    if image.content_type not in {"image/jpeg", "image/png", "image/bmp"}:
+        return JSONResponse(
+            status_code=400,
+            content={"code": 40002, "msg": "仅支持 JPG、PNG 或 BMP 图片。", "data": None},
+        )
+
     temp_id = str(uuid.uuid4())[:8]
     temp_dir = os.path.join(os.getcwd(), f"temp_openface_{temp_id}")
     os.makedirs(temp_dir, exist_ok=True)
 
     try:
         # 保存上传的图片
-        image_path = os.path.join(temp_dir, image.filename or "input.jpg")
+        suffix = Path(image.filename or "input.jpg").suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".bmp"}:
+            suffix = ".jpg"
+        image_path = os.path.join(temp_dir, f"input{suffix}")
         with open(image_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
 
@@ -170,11 +216,19 @@ async def analyze_face(image: UploadFile = File(...)):
 
         # 调用 OpenFace 命令行工具
         result = subprocess.run(
-            [OPENFACE_BIN, "-f", image_path, "-out_dir", temp_dir],
+            [OPENFACE_RESOLVED or OPENFACE_BIN, "-f", image_path, "-out_dir", temp_dir],
             capture_output=True,
             text=True,
             timeout=60,
+            cwd=str(Path(OPENFACE_RESOLVED or OPENFACE_BIN).resolve().parent),
         )
+
+        if result.returncode != 0:
+            logger.error("OpenFace failed rc=%s stderr=%s", result.returncode, result.stderr[-1000:])
+            return JSONResponse(
+                status_code=500,
+                content={"code": 50001, "msg": "OpenFace 分析失败，请稍后重试。", "data": None},
+            )
 
         # 查找输出的 CSV 文件
         csv_files = [f for f in os.listdir(temp_dir) if f.endswith(".csv")]

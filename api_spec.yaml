@@ -35,6 +35,11 @@
                     "description": "用户唯一标识，用于记录历史",
                     "example": "{{$string.uuid}}",
                     "type": "string"
+                  },
+                  "assessment": {
+                    "description": "可选量表 JSON 字符串，字段为 scale、total_score、severity、item9_score",
+                    "example": "{\"scale\":\"PHQ-9\",\"total_score\":12,\"severity\":\"中度抑郁倾向\",\"item9_score\":0}",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -44,7 +49,8 @@
               "example": {
                 "image": "",
                 "text": "寻寻觅觅冷冷清清凄凄惨惨戚戚，乍暖还寒时候，最难将息。三杯两盏淡酒，怎敌它，晚来风急，雁过也，正伤心，却是旧时相识。",
-                "user_id": "{{$string.uuid}}"
+                "user_id": "{{$string.uuid}}",
+                "assessment": "{\"scale\":\"PHQ-9\",\"total_score\":12,\"severity\":\"中度抑郁倾向\",\"item9_score\":0}"
               }
             }
           },
@@ -113,6 +119,18 @@
                         },
                         "advice_source": {
                           "type": "string"
+                        },
+                        "assessment": {
+                          "type": "object",
+                          "nullable": true,
+                          "description": "经后端校验的量表结果"
+                        },
+                        "crisis_risk": {
+                          "type": "boolean"
+                        },
+                        "crisis_reasons": {
+                          "type": "array",
+                          "items": {"type": "string"}
                         }
                       },
                       "required": [
@@ -147,7 +165,10 @@
                     },
                     "decision": "need_knowledge",
                     "reply": "听起来你有些焦虑，这是很常见的情绪。研究表明，适度运动可以有效缓解焦虑情绪。",
-                    "advice_source": "从知识库检索到的心理学论文摘要"
+                    "advice_source": "Kroenke et al. The PHQ-9, 2001",
+                    "assessment": {"scale": "PHQ-9", "total_score": 12, "severity": "中度抑郁倾向", "item9_score": 0},
+                    "crisis_risk": false,
+                    "crisis_reasons": []
                   }
                 }
               }
@@ -205,6 +226,17 @@
                     "type": "string",
                     "description": "可选：面部图像文件路径"
                   },
+                  "assessment": {
+                    "type": "object",
+                    "nullable": true,
+                    "description": "可选：PHQ-9/GAD-7 量表结果",
+                    "properties": {
+                      "scale": {"type": "string", "enum": ["PHQ-9", "GAD-7"]},
+                      "total_score": {"type": "integer"},
+                      "severity": {"type": "string"},
+                      "item9_score": {"type": "integer", "nullable": true}
+                    }
+                  },
                   "max_iterations": {
                     "type": "integer",
                     "description": "ReAct 最大迭代次数",
@@ -219,6 +251,7 @@
                 "query": "我最近总是睡不着，一闭眼就想很多事",
                 "session_id": "user-001",
                 "history": [],
+                "assessment": {"scale": "GAD-7", "total_score": 12, "severity": "中度焦虑倾向", "item9_score": null},
                 "max_iterations": 8
               }
             }

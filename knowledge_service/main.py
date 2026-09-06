@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
 
-# ===== 初始化 =====
+# ===== 初始化（整合远程同步逻辑）=====
 try:
     logger.info("Loading vector model...")
     model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
@@ -31,13 +31,33 @@ try:
     KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
     chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
     
-    # 获取正文 collection
     collection = chroma_client.get_collection(name="mental_health_knowledge")
-    # 获取标题 collection
     title_collection = chroma_client.get_collection(name="mental_health_knowledge_titles")
     
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
+    
+    # ===== 知识库自动同步（来自远程版本）=====
+    try:
+        KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
+        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        if lines and collection.count() != len(lines):
+            logger.info(
+                "Synchronizing knowledge base: %s -> %s records...",
+                collection.count(),
+                len(lines),
+            )
+            ids = [f"doc_{i+1}" for i in range(len(lines))]
+            embeddings = [model.encode(text).tolist() for text in lines]
+            collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
+            logger.info("Knowledge base synchronized: %s records.", collection.count())
+        elif not lines:
+            logger.warning("knowledge_data.txt is empty, no records added.")
+    except FileNotFoundError:
+        logger.error("knowledge_data.txt not found! Auto-sync skipped.")
+    except Exception as e:
+        logger.error("Knowledge synchronization failed: %s", str(e))
     
 except Exception as e:
     logger.error(f"Service initialization failed: {str(e)}")
@@ -48,7 +68,7 @@ except Exception as e:
 
 class RetrieveRequest(BaseModel):
     query: str
-    top_k: int = 5  # 默认返回 5 条
+    top_k: int = 5
 
 def preprocess_query(query: str) -> str:
     """将疑问句转为陈述语气"""
@@ -60,18 +80,20 @@ def preprocess_query(query: str) -> str:
     return query.strip()
 
 def extract_source(text: str) -> str:
-    """从知识条目文本中提取【来源：xxx】标签"""
-    match = re.search(r'【来源：([^】]+)】', text)
+    """
+    从知识条目文本中提取【来源：xxx】标签。
+    同时支持【】和[]两种括号格式（来自远程版本的改进）。
+    """
+    match = re.search(r'[【\[]来源：([^】\]]+)[】\]]', text)
     if match:
         return match.group(1).strip()
     return "Mental Health Knowledge Base"
 
-def extract_title(text: str) -> str:
-    """从知识条目文本中提取标题部分（第一个[...]中的内容）"""
-    match = re.match(r'^(\[[^\]]+\])\s*', text)
-    if match:
-        return match.group(1)
-    return ""
+def split_source(text: str) -> tuple[str, str]:
+    """拆分正文与行尾来源标签，避免把标记重复显示给前端。"""
+    source = extract_source(text)
+    content = re.sub(r'\s*【来源：[^】]+】\s*$', '', text).strip()
+    return content, source
 
 @app.post("/v1/knowledge/retrieve")
 async def retrieve_knowledge(req: RetrieveRequest):
@@ -114,37 +136,13 @@ async def retrieve_knowledge(req: RetrieveRequest):
         clean_query = preprocess_query(req.query)
         logger.debug(f"Cleaned query: {clean_query}")
         
-        # ===== 向量化查询 =====
-        try:
-            query_embedding = model.encode(clean_query).tolist()
-        except Exception as e:
-            logger.error(f"Model encoding failed: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "code": 50001,
-                    "msg": f"查询向量化失败: {str(e)}",
-                    "data": None
-                }
-            )
+        query_embedding = model.encode(clean_query).tolist()
         
         # ===== 路径1：正文语义检索 =====
-        try:
-            # 检索更多结果（top_k * 3），用于后续融合
-            content_results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(req.top_k * 3, collection.count() or 1)
-            )
-        except Exception as e:
-            logger.error(f"Content query failed: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "code": 50002,
-                    "msg": f"知识库检索失败: {str(e)}",
-                    "data": None
-                }
-            )
+        content_results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(req.top_k * 3, collection.count() or 1)
+        )
         
         # ===== 路径2：标题向量检索 =====
         try:
@@ -154,18 +152,13 @@ async def retrieve_knowledge(req: RetrieveRequest):
             )
         except Exception as e:
             logger.error(f"Title query failed: {str(e)}")
-            # 标题检索失败时，仅使用正文检索结果
             title_results = None
         
         # ===== 结果融合 =====
-        # 构建 id -> (doc, score_content, score_title) 的字典
         fused = {}
         
-        # 处理正文检索结果
         if content_results and content_results.get("documents") and content_results["documents"][0]:
             for doc, distance in zip(content_results["documents"][0], content_results["distances"][0]):
-                doc_id = doc  # 暂时用文档内容作为key，实际项目应该用更可靠的ID
-                # 防止重复，用文档内容作为唯一标识（因为内容本身是唯一的）
                 key = doc
                 similarity = 1 / (1 + distance)
                 fused[key] = {
@@ -174,49 +167,37 @@ async def retrieve_knowledge(req: RetrieveRequest):
                     "score_title": 0.0
                 }
         
-        # 处理标题检索结果
         if title_results and title_results.get("documents") and title_results["documents"][0]:
-            # 标题检索的 document 是标题文本，需要用它去匹配正文
             for title_doc, distance in zip(title_results["documents"][0], title_results["distances"][0]):
                 similarity = 1 / (1 + distance)
-                # 用标题文本去查找对应的正文文档
-                # 在正文检索中，文档内容包含了标题，所以可以通过标题前缀匹配
-                found = False
                 for key in list(fused.keys()):
                     if key.startswith(title_doc) or title_doc in key:
                         fused[key]["score_title"] = similarity
-                        found = True
                         break
-                if not found:
-                    # 如果正文检索中没有，单独添加（这种情况很少发生）
-                    # 此时需要获取完整文档，但这里简化处理
-                    logger.warning(f"Title match not found in content results: {title_doc}")
         
-        # ===== 计算最终得分 =====
+        # ===== 计算最终得分并组装返回结果 =====
         WEIGHT_CONTENT = 0.3
         WEIGHT_TITLE = 0.7
         
         items = []
         for key, data in fused.items():
             final_score = WEIGHT_CONTENT * data["score_content"] + WEIGHT_TITLE * data["score_title"]
-            # 如果标题得分不为0，说明标题有匹配，可以给予一定的额外加成
             if data["score_title"] > 0.1:
-                # 对标题匹配较好的结果，进一步轻微提权
                 final_score = final_score * 1.05
-            final_score = min(final_score, 1.0)  # 限制最大值
+            final_score = min(final_score, 1.0)
+            
+            # 使用 split_source 清理来源标签
+            content_clean, source = split_source(data["doc"])
             
             items.append({
-                "content": data["doc"],
-                "source": extract_source(data["doc"]),
+                "content": content_clean,
+                "source": source,
                 "score": round(final_score, 4)
             })
         
-        # 按最终得分降序排序
         items.sort(key=lambda x: x["score"], reverse=True)
-        # 只返回 top_k 个
         items = items[:req.top_k]
         
-        # ===== 记录成功日志 =====
         elapsed = time.perf_counter() - start_time
         logger.info(f"Query completed: {len(items)} hits, {elapsed:.3f}s")
         

@@ -17,6 +17,9 @@ import plotly.express as px
 import pandas as pd
 from datetime import datetime
 import json
+import os
+
+from assessment_scoring import build_assessment
 
 # ============================================================
 # 配置区
@@ -25,6 +28,35 @@ AGENT_API_URL = os.environ.get(
     "AGENT_API_URL",
     "http://localhost:8003/v1/agent/analyze"  # 成员3的接口地址
 )
+
+ANSWER_OPTIONS = {
+    "完全没有": 0,
+    "有几天": 1,
+    "一半以上天数": 2,
+    "几乎每天": 3,
+}
+
+PHQ9_QUESTIONS = [
+    "做事时提不起劲或没有兴趣",
+    "感到心情低落、沮丧或绝望",
+    "入睡困难、睡不安稳或睡眠过多",
+    "感觉疲倦或没有活力",
+    "食欲不振或吃得太多",
+    "觉得自己很糟，或觉得自己让家人失望",
+    "难以集中注意力，例如看报或看电视时",
+    "动作或说话速度缓慢，或烦躁不安、动来动去",
+    "有不如死掉或以某种方式伤害自己的念头",
+]
+
+GAD7_QUESTIONS = [
+    "感到紧张、焦虑或急切",
+    "不能停止或控制担忧",
+    "对各种事情担忧过多",
+    "很难放松下来",
+    "由于不安而无法静坐",
+    "容易变得烦恼或易怒",
+    "感到似乎将有可怕的事情发生",
+]
 
 # 从 AGENT_API_URL 推导其他端点
 _BASE_URL = AGENT_API_URL.replace("/v1/agent/analyze", "")
@@ -73,11 +105,54 @@ if "messages" not in st.session_state:
     st.session_state.messages = []  # 聊天历史
 if "mood_history" not in st.session_state:
     st.session_state.mood_history = []  # 情绪分数历史（用于画图）
+if "assessment" not in st.session_state:
+    st.session_state.assessment = None
 
 # ============================================================
 # 侧边栏：情绪变化曲线
 # ============================================================
 with st.sidebar:
+    st.subheader("📋 标准化心理量表")
+    st.caption("过去两周内，以下问题困扰你的频率。量表仅用于筛查，不替代诊断。")
+    selected_scale = st.selectbox(
+        "选择量表",
+        ["暂不填写", "PHQ-9", "GAD-7"],
+        key="assessment_scale",
+    )
+    if selected_scale != "暂不填写":
+        questions = PHQ9_QUESTIONS if selected_scale == "PHQ-9" else GAD7_QUESTIONS
+        with st.form("assessment_form"):
+            answers = []
+            for index, question in enumerate(questions, 1):
+                answer = st.radio(
+                    f"{index}. {question}",
+                    list(ANSWER_OPTIONS),
+                    index=None,
+                    key=f"{selected_scale}_{index}",
+                )
+                answers.append(ANSWER_OPTIONS.get(answer) if answer else None)
+            answered = sum(value is not None for value in answers)
+            st.progress(answered / len(questions), text=f"已完成 {answered}/{len(questions)}")
+            if st.form_submit_button("完成量表并计分", use_container_width=True):
+                if answered != len(questions):
+                    st.error("请完成全部题目后再提交。")
+                else:
+                    st.session_state.assessment = build_assessment(selected_scale, answers)
+                    total = st.session_state.assessment["total_score"]
+                    st.success(
+                        f"{selected_scale}：{total} 分，"
+                        f"{st.session_state.assessment['severity']}"
+                    )
+    elif st.session_state.assessment:
+        if st.button("清除已保存的量表结果"):
+            st.session_state.assessment = None
+            st.rerun()
+
+    if st.session_state.assessment:
+        saved = st.session_state.assessment
+        st.info(f"当前量表：{saved['scale']} {saved['total_score']} 分 · {saved['severity']}")
+
+    st.divider()
     st.subheader("📈 情绪变化曲线")
 
     if st.session_state.mood_history:
@@ -102,6 +177,7 @@ with st.sidebar:
     if st.button("🔄 清空对话"):
         st.session_state.messages = []
         st.session_state.mood_history = []
+        st.session_state.assessment = None
         st.rerun()
 
 # ============================================================
@@ -179,6 +255,15 @@ for msg in st.session_state.messages:
                 if data.get("advice_source"):
                     st.caption(f"📚 {data['advice_source']}")
 
+                if data.get("assessment"):
+                    assessment = data["assessment"]
+                    st.warning(
+                        f"📋 {assessment['scale']}：{assessment['total_score']} 分 · "
+                        f"{assessment['severity']}"
+                    )
+                if data.get("crisis_risk"):
+                    st.error("检测到高风险信号，请优先查看回复中的热线和就医建议。")
+
                 # 展开查看完整 JSON
                 with st.expander("🔍 查看完整分析数据"):
                     st.json(data)
@@ -220,6 +305,13 @@ if user_text:
     # 路由：有图片走 /v1/agent/analyze (multipart)，纯文本走 /v1/agent/chat (JSON)
     with st.spinner("正在分析中..."):
         try:
+            files = {}
+            data = {"text": user_text}
+            if st.session_state.assessment:
+                data["assessment"] = json.dumps(
+                    st.session_state.assessment, ensure_ascii=False
+                )
+
             if uploaded_image:
                 # --- 多模态模式：multipart ---
                 files = {
@@ -229,11 +321,12 @@ if user_text:
                         uploaded_image.type,
                     )
                 }
-                data = {"text": user_text}
                 resp = requests.post(AGENT_API_URL, data=data, files=files, timeout=60)
             else:
                 # --- 纯文本模式：JSON ---
                 payload = {"text": user_text}
+                if st.session_state.assessment:
+                    payload["assessment"] = st.session_state.assessment
                 resp = requests.post(
                     CHAT_API_URL,
                     json=payload,

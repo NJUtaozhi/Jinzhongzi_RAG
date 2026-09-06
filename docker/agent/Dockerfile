@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tenc
 
 # 复制 Agent 服务代码（成员3：根目录结构）
 COPY main.py /app/
+COPY assessment.py /app/
 COPY factories/ /app/factories/
 COPY orchestration/ /app/orchestration/
 COPY services/ /app/services/

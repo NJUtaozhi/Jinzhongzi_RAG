@@ -50,6 +50,7 @@ from langgraph.graph import END, START, StateGraph
 
 logger = logging.getLogger("agent_service.orchestrator")
 
+from assessment import assess_crisis_risk, crisis_referral_message, normalize_assessment
 from factories import create_agent
 from services.multimodal_client import MultimodalClient, EmotionFeatures
 from services.rag_client import RAGClient, RAGContext
@@ -115,6 +116,7 @@ REASON_SYSTEM_TEMPLATE = """\
 - 情绪标签: {emotion_label}
 - 用户意图: {user_intent}
 - RAG 检索知识: {rag_context}
+- 标准化量表: {assessment_summary}
 
 ## 任务
 1. **Thought**: 分析用户当前需要什么类型的帮助
@@ -212,6 +214,7 @@ class CounselingOrchestrator:
         conversation_history: Optional[List[Dict[str, str]]] = None,
         image_path: Optional[str] = None,
         audio_path: Optional[str] = None,
+        assessment: Optional[Dict[str, Any]] = None,
         max_iterations: int = 8,
     ) -> Dict[str, Any]:
         """执行一轮心理健康辅导对话.
@@ -222,6 +225,7 @@ class CounselingOrchestrator:
             conversation_history: 之前的对话历史.
             image_path: 可选的面部图像文件路径 (Block 1).
             audio_path: 可选的语音文件路径 (Block 1).
+            assessment: 可选的 PHQ-9/GAD-7 标准化评估结果.
             max_iterations: reason 节点 ReAct 内部循环上限.
 
         Returns:
@@ -239,6 +243,7 @@ class CounselingOrchestrator:
         state["runtime_context"] = {  # type: ignore[typeddict-unknown-key]
             "image_path": image_path,
             "audio_path": audio_path,
+            "assessment": assessment,
         }
 
         return self.graph.invoke(state)
@@ -333,6 +338,10 @@ class CounselingOrchestrator:
         image_path = rt.get("image_path") if isinstance(rt, dict) else None
         audio_path = rt.get("audio_path") if isinstance(rt, dict) else None
         user_query = state["user_query"]
+        assessment = normalize_assessment(
+            rt.get("assessment") if isinstance(rt, dict) else None
+        )
+        crisis_risk, crisis_reasons = assess_crisis_risk(assessment)
 
         # 调用 Block 1
         from pathlib import Path
@@ -343,6 +352,13 @@ class CounselingOrchestrator:
         )
 
         log.append(f"perceive modalities={features.available_modalities}")
+        if assessment:
+            log.append(
+                "perceive assessment="
+                f"{assessment['scale']}:{assessment['total_score']}:{assessment['severity']}"
+            )
+        if crisis_risk:
+            log.append(f"perceive crisis_risk={crisis_reasons}")
         if features.error_modalities:
             log.append(f"perceive errors={features.error_modalities}")
 
@@ -357,6 +373,9 @@ class CounselingOrchestrator:
 
         return {
             "emotion_features": features.to_dict(),
+            "assessment": assessment or {},
+            "crisis_risk": crisis_risk,
+            "crisis_reasons": crisis_reasons,
             "status": "understanding",
             "execution_log": log,
             "react_trace": react_trace,
@@ -445,6 +464,12 @@ class CounselingOrchestrator:
         emotion = state.get("emotion_label", "")
         if emotion and emotion != "neutral":
             query_parts.append(f"情绪类型: {emotion}")
+        assessment = state.get("assessment", {})
+        if assessment:
+            query_parts.append(
+                f"量表: {assessment.get('scale')} {assessment.get('total_score')}分 "
+                f"{assessment.get('severity')}"
+            )
         combined_query = "; ".join(query_parts)
 
         rag_ctx: RAGContext = self.rag.retrieve(
@@ -531,6 +556,13 @@ class CounselingOrchestrator:
         # -- emotion summary -----------------------------------------------
         features = state.get("emotion_features", {})
         ef = EmotionFeatures(**features) if features else EmotionFeatures()
+        assessment = state.get("assessment", {})
+        assessment_summary = (
+            f"{assessment.get('scale')} 总分 {assessment.get('total_score')}，"
+            f"分级：{assessment.get('severity')}，"
+            f"第9题：{assessment.get('item9_score')}"
+            if assessment else "(未填写量表)"
+        )
 
         # -- 构建 prompt ---------------------------------------------------
         prompt = REASON_SYSTEM_TEMPLATE.format(
@@ -541,6 +573,7 @@ class CounselingOrchestrator:
             emotion_label=state.get("emotion_label", "unknown"),
             user_intent=state.get("user_intent", "unclear"),
             rag_context=state.get("rag_context", "(未检索)"),
+            assessment_summary=assessment_summary,
         )
 
         try:
@@ -620,6 +653,26 @@ class CounselingOrchestrator:
         log = list(state.get("execution_log", []))
         draft = state.get("draft_response", "")
 
+        # Week 6: crisis thresholds are deterministic and override LLM output.
+        if state.get("crisis_risk", False):
+            reasons = state.get("crisis_reasons", [])
+            crisis_draft = crisis_referral_message()
+            log.append(f"safety crisis_override={reasons}")
+            return {
+                "draft_response": crisis_draft,
+                "user_intent": "crisis_help",
+                "safety_issues": [],
+                "safety_passed": True,
+                "status": "responding",
+                "execution_log": log,
+                "react_trace": self._append_react(
+                    state,
+                    thought=f"量表高风险规则触发: {reasons}",
+                    action="crisis_referral",
+                    observation="已提供热线、真人陪伴与就近就医建议",
+                ),
+            }
+
         # -- 第一层: 确定性规则检查 -----------------------------------------
         rule_issues = self._rule_based_safety_check(draft)
 
@@ -685,6 +738,17 @@ class CounselingOrchestrator:
                 "他们能给你更个性化和安全的指导. 我在这里继续倾听你."
             )
             log.append("respond_fallback_due_to_safety")
+
+        # Make the assessment basis visible in every final report, rather than
+        # relying on an LLM to mention it consistently.
+        assessment = state.get("assessment", {})
+        if assessment and assessment.get("scale") not in final:
+            assessment_line = (
+                f"本次 {assessment.get('scale')} 量表总分为 "
+                f"{assessment.get('total_score')} 分，分级为“{assessment.get('severity')}”。"
+                "量表结果仅用于筛查，不能替代专业诊断。\n\n"
+            )
+            final = assessment_line + final
 
         # 更新对话历史
         history = list(state.get("conversation_history", []))
