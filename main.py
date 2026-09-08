@@ -83,13 +83,23 @@ class ChatResponse(BaseModel):
     session_id: str = Field(default="", description="会话 ID")
     assessment: Optional[dict] = Field(default=None, description="标准化量表结果")
     crisis_risk: bool = Field(default=False, description="是否触发高风险转介")
+    emotion_summary: str = Field(default="", description="会话情绪摘要（多轮记忆）")
+    history: List[dict] = Field(default_factory=list, description="截断后的对话历史")
 
 
 class FrontendChatRequest(BaseModel):
     """前端纯文本对话请求 (兼容路由 /v1/agent/chat)."""
 
     text: str = Field(..., description="用户输入文本", min_length=1)
-    user_id: str = Field(default=None, description="可选: 用户ID")
+    user_id: Optional[str] = Field(default=None, description="可选: 用户ID（稳定会话标识）")
+    session_id: Optional[str] = Field(
+        default=None,
+        description="可选: 会话 ID（多轮记忆键，优先级高于 user_id）",
+    )
+    history: List[dict] = Field(
+        default_factory=list,
+        description="可选: 对话历史 [{\"role\":\"user/assistant\",\"content\":\"...\"}]",
+    )
     assessment: Optional[dict] = Field(
         default=None,
         description="可选: {scale, total_score, severity, item9_score}",
@@ -220,6 +230,8 @@ async def chat(req: ChatRequest):
             session_id=req.session_id,
             assessment=result.get("assessment") or None,
             crisis_risk=bool(result.get("crisis_risk", False)),
+            emotion_summary=result.get("emotion_summary", ""),
+            history=result.get("conversation_history", []),
         )
     except Exception as exc:
         elapsed = time.time() - t_start
@@ -346,7 +358,9 @@ async def chat_stream(req: ChatRequest):
 async def agent_analyze(
     text: str = Form(..., description="用户输入文本"),
     image: UploadFile = File(None, description="可选: 面部图片"),
-    user_id: str = Form(None, description="可选: 用户ID"),
+    user_id: str = Form(None, description="可选: 用户ID（稳定会话标识）"),
+    session_id: str = Form(None, description="可选: 会话 ID（多轮记忆键，优先级高于 user_id）"),
+    history: str = Form(None, description="可选: JSON 格式对话历史 [{role, content}]"),
     assessment: str = Form(None, description="可选: JSON 格式 PHQ-9/GAD-7 结果"),
 ):
     """兼容成员4前端的 /v1/agent/analyze 路由.
@@ -377,13 +391,23 @@ async def agent_analyze(
         except Exception:
             pass
 
+    # 解析可选的历史透传字段（multipart 中为 JSON 字符串）
+    history_data = None
+    if history:
+        try:
+            parsed_history = json.loads(history)
+            if isinstance(parsed_history, list):
+                history_data = parsed_history
+        except (json.JSONDecodeError, ValueError):
+            history_data = None
+
     t_start = time.time()
     try:
         orch = get_orch()
         result = orch.run(
             user_query=text,
-            session_id=user_id or str(uuid.uuid4())[:8],
-            conversation_history=None,
+            session_id=session_id or user_id or str(uuid.uuid4())[:8],
+            conversation_history=history_data,
             image_path=image_path,
             audio_path=None,
             assessment=assessment_data,
@@ -430,6 +454,8 @@ async def agent_analyze(
                 "assessment": result.get("assessment") or None,
                 "crisis_risk": bool(result.get("crisis_risk", False)),
                 "crisis_reasons": result.get("crisis_reasons", []),
+                "emotion_summary": result.get("emotion_summary", ""),
+                "history": result.get("conversation_history", []),
             },
         }
     except Exception as exc:
@@ -463,8 +489,8 @@ async def agent_chat(req: FrontendChatRequest):
         orch = get_orch()
         result = orch.run(
             user_query=req.text,
-            session_id=req.user_id or str(uuid.uuid4())[:8],
-            conversation_history=None,
+            session_id=req.session_id or req.user_id or str(uuid.uuid4())[:8],
+            conversation_history=req.history if req.history else None,
             image_path=None,
             audio_path=None,
             assessment=normalize_assessment(req.assessment),
@@ -493,6 +519,8 @@ async def agent_chat(req: FrontendChatRequest):
                 "assessment": result.get("assessment") or None,
                 "crisis_risk": bool(result.get("crisis_risk", False)),
                 "crisis_reasons": result.get("crisis_reasons", []),
+                "emotion_summary": result.get("emotion_summary", ""),
+                "history": result.get("conversation_history", []),
             },
         }
     except Exception as exc:

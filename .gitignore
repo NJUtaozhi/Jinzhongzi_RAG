@@ -32,3 +32,6 @@ kb_chroma_db/
 *.csv
 *.jpg
 *.png
+
+# 成员3 本地 harness（不入库）
+agent_harness/

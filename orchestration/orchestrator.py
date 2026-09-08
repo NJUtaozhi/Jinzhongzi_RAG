@@ -60,6 +60,19 @@ from tools.counseling_tools import (
     get_tools_schema_text,
 )
 
+from .memory import (
+    DEFAULT_MAX_ROUNDS,
+    EMOTION_SUMMARY_SYSTEM,
+    MAX_TRAJECTORY,
+    SessionRecord,
+    SessionStore,
+    build_emotion_summary_prompt,
+    build_session_store,
+    fallback_emotion_summary,
+    parse_emotion_summary,
+    render_emotion_summary,
+    truncate_history,
+)
 from .state import CounselingState, default_state
 
 # 可选: 加载 .env (不强制依赖 python-dotenv)
@@ -112,6 +125,7 @@ REASON_SYSTEM_TEMPLATE = """\
 ## 当前上下文
 - 用户消息: {user_query}
 - 对话历史: {history_summary}
+- 会话情绪摘要: {session_summary}
 - 多模态情绪特征: {emotion_summary}
 - 情绪标签: {emotion_label}
 - 用户意图: {user_intent}
@@ -175,6 +189,8 @@ class CounselingOrchestrator:
         self,
         multimodal_base_url: str | None = None,
         rag_base_url: str | None = None,
+        max_rounds: int = DEFAULT_MAX_ROUNDS,
+        session_store: SessionStore | None = None,
     ) -> None:
         """初始化编排器.
 
@@ -183,6 +199,9 @@ class CounselingOrchestrator:
                 默认读取环境变量 MULTIMODAL_BASE_URL.
             rag_base_url: Block 2 RAG API 基地址.
                 默认读取环境变量 RAG_BASE_URL.
+            max_rounds: 会话历史保留的最大轮次数（超出后截断）。
+            session_store: 会话存储实例；默认按 SESSION_STORE_DIR 构建
+                （无该环境变量时退化为纯内存态）。
         """
         # -- 外部服务客户端 -------------------------------------------------
         self.multimodal = MultimodalClient(base_url=multimodal_base_url)
@@ -191,16 +210,21 @@ class CounselingOrchestrator:
         # -- LLM Agent (用于纯推理节点: understand / reason / safety) -------
         self.understand_agent = create_agent(
             system_message=UNDERSTAND_SYSTEM,
-            enable_tools=False,
         )
         self.reason_agent = create_agent(
             system_message="你是心理健康辅导 AI 助手.",
-            enable_tools=False,
         )
         self.safety_agent = create_agent(
             system_message=SAFETY_SYSTEM,
-            enable_tools=False,
         )
+        # 情绪摘要 Agent (任务 7.3 多轮记忆)
+        self.summarize_agent = create_agent(
+            system_message=EMOTION_SUMMARY_SYSTEM,
+        )
+
+        # -- 多轮记忆: 历史截断上限 + 会话存储 ------------------------------
+        self.max_rounds = max_rounds
+        self.session_store = session_store or build_session_store(max_rounds=max_rounds)
 
         # -- 编译图 --------------------------------------------------------
         self.graph = self._build_graph()
@@ -229,15 +253,28 @@ class CounselingOrchestrator:
             max_iterations: reason 节点 ReAct 内部循环上限.
 
         Returns:
-            包含 final_answer, react_trace 等字段的完整状态 dict.
+            包含 final_answer, react_trace 等字段的完整状态 dict；
+            多轮记忆场景额外包含 emotion_summary / focus_trajectory /
+            截断后的 conversation_history。
         """
+        # -- 加载会话记忆（历史 + 上一轮情绪摘要） -------------------------
+        record = self.session_store.load(session_id)
+
+        # 历史来源：请求显式携带 history 时以请求为准（兼容旧客户端回传），
+        # 否则回退到服务端按 session_id 存储的历史。
+        if conversation_history:
+            history = list(conversation_history)
+        else:
+            history = list(record.history)
+        previous_summary = record.emotion_summary
+
         state = default_state(
             user_query=user_query,
             session_id=session_id,
             max_iterations=max_iterations,
         )
-        if conversation_history:
-            state["conversation_history"] = conversation_history
+        state["conversation_history"] = history
+        state["emotion_summary"] = previous_summary
 
         # 将文件路径注入 runtime context（LangGraph state 不持文件路径）
         state["runtime_context"] = {  # type: ignore[typeddict-unknown-key]
@@ -246,7 +283,44 @@ class CounselingOrchestrator:
             "assessment": assessment,
         }
 
-        return self.graph.invoke(state)
+        result = self.graph.invoke(state)
+
+        # -- 本轮成功后更新会话记忆（截断历史 + 生成新情绪摘要） -----------
+        if result.get("status") == "completed":
+            bounded_history = truncate_history(
+                result.get("conversation_history", []),
+                max_rounds=self.max_rounds,
+            )
+            summary = self._generate_emotion_summary(
+                user_query=result.get("user_query", user_query),
+                emotion_label=result.get("emotion_label", ""),
+                assessment=result.get("assessment", {}),
+                final_answer=result.get("final_answer", ""),
+                previous_summary=previous_summary,
+            )
+            trajectory = list(record.focus_trajectory)
+            trajectory.append(summary)
+            trajectory = trajectory[-MAX_TRAJECTORY:]
+
+            self.session_store.save(
+                session_id,
+                SessionRecord(
+                    history=bounded_history,
+                    emotion_summary=summary,
+                    focus_trajectory=trajectory,
+                    turn_count=record.turn_count + 1,
+                ),
+            )
+
+            result["conversation_history"] = bounded_history
+            result["emotion_summary"] = summary
+            result["focus_trajectory"] = trajectory
+        else:
+            # 失败轮不覆盖记忆，仅透传已有摘要
+            result["emotion_summary"] = previous_summary
+            result["focus_trajectory"] = list(record.focus_trajectory)
+
+        return result
 
     # ── 2. Graph assembly ──────────────────────────────────────────────────
 
@@ -400,6 +474,7 @@ class CounselingOrchestrator:
             f"用户消息: {state['user_query']}\n"
             f"多模态情绪特征: {emotion_summary}\n"
             f"对话历史轮数: {len(state.get('conversation_history', []))}\n"
+            f"会话情绪摘要: {state.get('emotion_summary', '') or '(无)'}\n"
             "\n请输出意图标签、情绪标签和简短概括."
         )
 
@@ -569,6 +644,7 @@ class CounselingOrchestrator:
             tools_schema=get_tools_schema_text(),
             user_query=state["user_query"],
             history_summary=history_summary,
+            session_summary=state.get("emotion_summary", "") or "(无)",
             emotion_summary=ef.summary(),
             emotion_label=state.get("emotion_label", "unknown"),
             user_intent=state.get("user_intent", "unclear"),
@@ -822,6 +898,36 @@ class CounselingOrchestrator:
             return str(result)
         return str(messages[-1].content)
 
+    def _generate_emotion_summary(
+        self,
+        *,
+        user_query: str,
+        emotion_label: str,
+        assessment: Optional[Dict[str, Any]],
+        final_answer: str,
+        previous_summary: str = "",
+    ) -> str:
+        """调用 LLM 生成本轮会话情绪摘要（失败时降级为确定性摘要）。
+
+        这是任务 7.3 "上下文工程" 的核心：每轮对话后把情绪标签、量表分数、
+        关注点压缩成一段短摘要，下一轮注入提示词，避免历史无限膨胀。
+        """
+        prompt = build_emotion_summary_prompt(
+            user_query=user_query,
+            emotion_label=emotion_label,
+            assessment=assessment,
+            final_answer=final_answer,
+            previous_summary=previous_summary,
+        )
+        try:
+            raw = self._agent_call(self.summarize_agent, prompt)
+            parsed = parse_emotion_summary(raw)
+            if parsed.get("summary"):
+                return render_emotion_summary(parsed)
+        except Exception as exc:
+            logger.warning("summarize failed: %s", exc)
+        return fallback_emotion_summary(emotion_label, assessment, previous_summary)
+
     # 5b. ReAct audit trail ─────────────────────────────────────────────────
 
     def _append_react(
@@ -972,8 +1078,8 @@ class CounselingOrchestrator:
     ) -> str:
         """将工具产出的半成品渲染为自然对话回应.
 
-        当前为简化版: 直接将工具内容作为草稿, reason 节点不二次调用 LLM
-        润色. 后续可扩展为再调一次 LLM 做风格化.
+        crisis_intervention 直接返回工具内容（含热线信息，不可改写）；
+        其余工具再调一次 LLM 将结构化内容润色为自然对话，失败则降级返回原文.
         """
         # 对于 crisis_intervention, 直接使用工具内容 (包含热线信息, 不能改)
         if tool_name == "crisis_intervention":

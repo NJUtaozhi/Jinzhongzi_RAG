@@ -193,6 +193,31 @@ Docker 环境:  http://agent:8003 + /v1/agent/analyze → http://agent:8003/v1/a
 - PHQ-9 总分 ≥15 或第 9 题 ≥1 时，确定性触发高风险转介，最终回复必须包含热线与就近就医建议。
 - 量表仅用于筛查，不能替代专业诊断。
 
+### 4.2 Week 7 多轮记忆字段
+
+为支持多轮对话记忆与情绪摘要，`/chat`、`/v1/agent/chat`、`/v1/agent/analyze` 增加以下字段：
+
+**请求（可选，多轮场景使用）：**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `session_id` | string | 稳定会话标识。`/v1/agent/chat` 与 `/v1/agent/analyze` 亦可用 `user_id`，`session_id` 优先 |
+| `history` | array | 对话历史 `[{"role": "user"\|"assistant", "content": "..."}]`；`/v1/agent/analyze`（multipart）中为 JSON 字符串 |
+
+**响应（新增）：**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `emotion_summary` | string | 后端生成的会话情绪摘要（含量表分数、情绪标签、关注点），随会话逐轮更新 |
+| `history` | array | 截断后的对话历史（最多保留 10 轮），前端可直接回传 |
+| `focus_trajectory` | array | 关注点变化轨迹（历史摘要列表），供情绪轨迹卡片展示 |
+
+**约定：**
+
+- 后端按 `session_id` 维护会话记忆（默认内存态，设置 `SESSION_STORE_DIR` 可落盘持久化）。
+- 请求显式携带 `history` 时以请求为准（兼容旧客户端回传）；否则回退到服务端存储的历史。
+- 历史按轮次上限（默认 10 轮）截断，旧轮次细节由 `emotion_summary` 压缩承接。
+
 ---
 
 ## 5. Docker 部署
