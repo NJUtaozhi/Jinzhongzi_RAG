@@ -3,11 +3,22 @@
 前端负责人 - 成员4 开发
 
 对接真实 Agent API (成员3 的 Jinzhongzi_RAG 服务)
-支持：多轮对话、历史记录、情绪变化曲线、图片上传
+支持：多轮对话、历史记录、情绪变化曲线、图片上传、情绪轨迹卡片
+
+任务7.4 新增：
+- 历史透传前端：对话历史随请求传入 Agent（与成员3约定字段格式）
+- 情绪轨迹卡片：前端展示会话情绪摘要/关注点轨迹
+- UI 终验配合：加载态、错误提示、移动端适配优化
 
 路由逻辑：
 - 纯文本对话 → POST /v1/agent/chat (JSON, 更快)
 - 带图片对话 → POST /v1/agent/analyze (multipart, 多模态)
+
+字段格式约定（与成员3后端对齐）：
+    history:           [{"role": "user" | "assistant", "content": "..."}]
+    session_id:        稳定会话标识
+    emotion_summary:   后端生成的会话情绪摘要（字符串）
+    focus_trajectory:  关注点变化轨迹（历史摘要列表，供前端情绪轨迹卡片使用）
 """
 
 import os
@@ -17,7 +28,7 @@ import plotly.express as px
 import pandas as pd
 from datetime import datetime
 import json
-import os
+import uuid
 
 from assessment_scoring import build_assessment
 
@@ -86,6 +97,14 @@ SENTIMENT_SCORE_MAP = {
     "disgust": 0.5,
 }
 
+# 趋势图标映射
+TREND_ICONS = {
+    "首次": "🆕",
+    "稳定": "➡️",
+    "缓解": "📉",
+    "加重": "📈",
+}
+
 # ============================================================
 # 页面配置
 # ============================================================
@@ -107,11 +126,72 @@ if "mood_history" not in st.session_state:
     st.session_state.mood_history = []  # 情绪分数历史（用于画图）
 if "assessment" not in st.session_state:
     st.session_state.assessment = None
+if "session_id" not in st.session_state:
+    # 生成稳定的会话 ID（页面刷新前不变）
+    st.session_state.session_id = str(uuid.uuid4())[:8]
+if "emotion_trajectory" not in st.session_state:
+    # 情绪轨迹（从后端 focus_trajectory 同步）
+    st.session_state.emotion_trajectory = []
+if "last_emotion_summary" not in st.session_state:
+    # 最近一轮的会话情绪摘要
+    st.session_state.last_emotion_summary = ""
 
 # ============================================================
-# 侧边栏：情绪变化曲线
+# 辅助函数：构建历史透传 payload
+# ============================================================
+def build_history_payload():
+    """从 session_state.messages 构建后端期望的历史格式。
+
+    格式: [{"role": "user"|"assistant", "content": "..."}]
+    只取最近 DEFAULT_MAX_ROUNDS * 2 条（与后端截断策略一致）。
+    """
+    history = []
+    for msg in st.session_state.messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role in ("user", "assistant") and content:
+            history.append({"role": role, "content": content})
+    # 保留最近 20 条（10 轮 × 2），与后端 DEFAULT_MAX_ROUNDS 一致
+    return history[-20:]
+
+
+def parse_emotion_summary_text(summary_text):
+    """解析后端返回的情绪摘要文本为结构化字段。
+
+    后端 render_emotion_summary 输出格式:
+    "情绪: xxx；关注点: xxx；趋势: xxx；量表: xxx"
+
+    返回 dict: {emotion, focus, trend, assessment}
+    """
+    result = {"emotion": "", "focus": "", "trend": "", "assessment": ""}
+    if not summary_text:
+        return result
+    for part in summary_text.split("；"):
+        part = part.strip()
+        if ":" in part or "：" in part:
+            # 兼容全角/半角冒号
+            sep = "：" if "：" in part else ":"
+            key, _, val = part.partition(sep)
+            key = key.strip()
+            val = val.strip()
+            if "情绪" in key:
+                result["emotion"] = val
+            elif "关注点" in key:
+                result["focus"] = val
+            elif "趋势" in key:
+                result["trend"] = val
+            elif "量表" in key:
+                result["assessment"] = val
+    return result
+
+
+# ============================================================
+# 侧边栏：标准化心理量表 + 情绪变化曲线
 # ============================================================
 with st.sidebar:
+    # 显示当前会话 ID
+    st.caption(f"🆔 会话 ID: `{st.session_state.session_id}`")
+
     st.subheader("📋 标准化心理量表")
     st.caption("过去两周内，以下问题困扰你的频率。量表仅用于筛查，不替代诊断。")
     selected_scale = st.selectbox(
@@ -173,17 +253,19 @@ with st.sidebar:
     else:
         st.info("开始对话后，这里会显示情绪变化曲线")
 
-    # 清空对话按钮
-    if st.button("🔄 清空对话"):
+    st.divider()
+    st.subheader("🔄 会话管理")
+    if st.button("清空对话并重置会话", use_container_width=True):
         st.session_state.messages = []
         st.session_state.mood_history = []
         st.session_state.assessment = None
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+        st.session_state.emotion_trajectory = []
+        st.session_state.last_emotion_summary = ""
         st.rerun()
 
 # ============================================================
 # 后端健康检查
-# Agent /health 返回 {services: {multimodal: url, rag: url}}，
-# 真实探测各服务 /health 端点判断在线状态（Docker 容器间用服务名互通）
 # ============================================================
 try:
     health = requests.get(HEALTH_CHECK_URL, timeout=3)
@@ -210,6 +292,43 @@ except Exception:
     st.caption("🔴 无法连接后端服务")
 
 st.divider()
+
+# ============================================================
+# 情绪轨迹卡片（任务7.4 新增）
+# ============================================================
+if st.session_state.emotion_trajectory:
+    with st.expander("🎭 情绪轨迹卡片", expanded=True):
+        trajectory = st.session_state.emotion_trajectory
+        # 倒序展示（最新在最前）
+        for idx, entry in enumerate(reversed(trajectory)):
+            parsed = parse_emotion_summary_text(entry) if isinstance(entry, str) else entry
+            if isinstance(entry, dict):
+                # 兼容 dict 格式
+                parsed = {
+                    "emotion": entry.get("summary", entry.get("emotion", "")),
+                    "focus": entry.get("focus", ""),
+                    "trend": entry.get("trend", ""),
+                    "assessment": entry.get("assessment", ""),
+                }
+
+            turn_num = len(trajectory) - idx
+            trend_icon = TREND_ICONS.get(parsed.get("trend", ""), "•")
+
+            col_trend, col_turn, col_focus = st.columns([1, 1, 4])
+            with col_trend:
+                st.markdown(f"### {trend_icon}")
+            with col_turn:
+                st.caption(f"第 {turn_num} 轮")
+            with col_focus:
+                if parsed.get("emotion"):
+                    st.markdown(f"**情绪：** {parsed['emotion']}")
+                if parsed.get("focus"):
+                    st.markdown(f"**关注点：** {parsed['focus']}")
+                if parsed.get("assessment") and parsed["assessment"] != "无":
+                    st.caption(f"📋 {parsed['assessment']}")
+
+            if idx < len(trajectory) - 1:
+                st.divider()
 
 # ============================================================
 # 主界面：聊天记录展示
@@ -254,6 +373,10 @@ for msg in st.session_state.messages:
 
                 if data.get("advice_source"):
                     st.caption(f"📚 {data['advice_source']}")
+
+                # 情绪摘要（任务7.4 新增）
+                if data.get("emotion_summary"):
+                    st.caption(f"💬 会话情绪摘要：{data['emotion_summary']}")
 
                 if data.get("assessment"):
                     assessment = data["assessment"]
@@ -301,17 +424,13 @@ if user_text:
 
     st.session_state.messages.append(user_msg)
 
-    # 2. 调用 Agent API
+    # 2. 构建历史透传 payload（任务7.4 核心改动）
+    history_payload = build_history_payload()
+
+    # 3. 调用 Agent API
     # 路由：有图片走 /v1/agent/analyze (multipart)，纯文本走 /v1/agent/chat (JSON)
     with st.spinner("正在分析中..."):
         try:
-            files = {}
-            data = {"text": user_text}
-            if st.session_state.assessment:
-                data["assessment"] = json.dumps(
-                    st.session_state.assessment, ensure_ascii=False
-                )
-
             if uploaded_image:
                 # --- 多模态模式：multipart ---
                 files = {
@@ -321,10 +440,23 @@ if user_text:
                         uploaded_image.type,
                     )
                 }
+                data = {
+                    "text": user_text,
+                    "session_id": st.session_state.session_id,
+                    "history": json.dumps(history_payload, ensure_ascii=False),
+                }
+                if st.session_state.assessment:
+                    data["assessment"] = json.dumps(
+                        st.session_state.assessment, ensure_ascii=False
+                    )
                 resp = requests.post(AGENT_API_URL, data=data, files=files, timeout=60)
             else:
                 # --- 纯文本模式：JSON ---
-                payload = {"text": user_text}
+                payload = {
+                    "text": user_text,
+                    "session_id": st.session_state.session_id,
+                    "history": history_payload,
+                }
                 if st.session_state.assessment:
                     payload["assessment"] = st.session_state.assessment
                 resp = requests.post(
@@ -336,28 +468,48 @@ if user_text:
 
             if resp.status_code == 200:
                 result = resp.json()
+                data_result = result.get("data", {})
+
                 assistant_msg = {
                     "role": "assistant",
-                    "content": result.get("data", {}).get("reply", ""),
-                    "data": result.get("data", {}),
+                    "content": data_result.get("reply", ""),
+                    "data": data_result,
                     "time": datetime.now().strftime("%H:%M:%S"),
                 }
                 st.session_state.messages.append(assistant_msg)
 
-                # 记录情绪历史
+                # 记录情绪历史（用于曲线图）
                 text_sentiment = (
-                    result.get("data", {})
-                    .get("analysis", {})
+                    data_result.get("analysis", {})
                     .get("text_sentiment", "neutral")
                 )
                 st.session_state.mood_history.append({
                     "time": datetime.now().strftime("%H:%M:%S"),
                     "sentiment": text_sentiment,
                 })
+
+                # 更新情绪轨迹（任务7.4 新增）
+                emotion_summary = data_result.get("emotion_summary", "")
+                if emotion_summary:
+                    st.session_state.last_emotion_summary = emotion_summary
+
+                focus_trajectory = data_result.get("focus_trajectory", [])
+                if focus_trajectory:
+                    st.session_state.emotion_trajectory = focus_trajectory
+                elif emotion_summary:
+                    # 后端未返回 trajectory 时，将摘要追加到本地轨迹
+                    st.session_state.emotion_trajectory.append(emotion_summary)
+                    # 保留最近 20 条
+                    st.session_state.emotion_trajectory = (
+                        st.session_state.emotion_trajectory[-20:]
+                    )
+
             else:
                 st.error(f"接口返回错误: {resp.status_code}")
         except requests.exceptions.ConnectionError:
             st.error("⚠️ 无法连接到后端服务，请确认 Agent 服务已启动。")
+        except requests.exceptions.Timeout:
+            st.error("⏱️ 请求超时，请稍后重试。")
         except Exception as e:
             st.error(f"请求失败: {str(e)}")
 
@@ -368,4 +520,5 @@ if user_text:
 # ============================================================
 st.divider()
 if DEBUG:
-    st.caption(f"Agent API: {AGENT_API_URL}")
+    st.caption(f"Agent API: {AGENT_API_URL} | Chat API: {CHAT_API_URL}")
+    st.caption(f"Session ID: {st.session_state.session_id} | History: {len(st.session_state.messages)} 条")

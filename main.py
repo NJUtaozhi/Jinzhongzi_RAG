@@ -455,6 +455,7 @@ async def agent_analyze(
                 "crisis_risk": bool(result.get("crisis_risk", False)),
                 "crisis_reasons": result.get("crisis_reasons", []),
                 "emotion_summary": result.get("emotion_summary", ""),
+                "focus_trajectory": result.get("focus_trajectory", []),
                 "history": result.get("conversation_history", []),
             },
         }
@@ -520,6 +521,7 @@ async def agent_chat(req: FrontendChatRequest):
                 "crisis_risk": bool(result.get("crisis_risk", False)),
                 "crisis_reasons": result.get("crisis_reasons", []),
                 "emotion_summary": result.get("emotion_summary", ""),
+                "focus_trajectory": result.get("focus_trajectory", []),
                 "history": result.get("conversation_history", []),
             },
         }
