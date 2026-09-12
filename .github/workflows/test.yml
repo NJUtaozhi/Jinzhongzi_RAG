@@ -29,6 +29,6 @@ jobs:
 
       - name: 运行测试
         run: |
-          python -m pytest tests frontend/test_assessment_scoring.py -q
+          python -m pytest tests frontend/tests frontend/test_assessment_scoring.py -q
           cd vision_service
           python -m pytest tests -q
