@@ -31,5 +31,6 @@ jobs:
         run: |
           python -m pytest tests frontend/test_assessment_scoring.py -q
           python -m pytest frontend/tests -q
+          python -m pytest knowledge_service/tests/test_sentiment_model.py knowledge_service/tests/test_sentiment_api.py -q
           cd vision_service
           python -m pytest tests -q

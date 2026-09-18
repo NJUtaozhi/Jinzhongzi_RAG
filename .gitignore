@@ -35,3 +35,7 @@ kb_chroma_db/
 
 # 成员3 本地 harness（不入库）
 agent_harness/
+
+# Task 7.1 offline model weights (keep only the instructions)
+models/chinese-emotion/*
+!models/chinese-emotion/README.md

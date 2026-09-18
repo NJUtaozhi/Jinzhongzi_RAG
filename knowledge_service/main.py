@@ -13,6 +13,13 @@ from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 import chromadb
 
+try:
+    from .sentiment_api import router as sentiment_router
+    from .sentiment_model import sentiment_model
+except ImportError:  # uvicorn main:app inside /app
+    from sentiment_api import router as sentiment_router
+    from sentiment_model import sentiment_model
+
 # ===== 配置日志 =====
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
+app.include_router(sentiment_router)
 
 # ===== 初始化（整合远程同步逻辑）=====
 try:
@@ -69,6 +77,7 @@ except Exception as e:
 class RetrieveRequest(BaseModel):
     query: str
     top_k: int = 5
+
 
 def preprocess_query(query: str) -> str:
     """将疑问句转为陈述语气"""
@@ -235,5 +244,10 @@ def health_check():
     return {
         "status": "ok",
         "service": "knowledge-retrieval",
-        "doc_count": collection.count()
+        "doc_count": collection.count(),
+        "sentiment_model": {
+            "loaded": sentiment_model.loaded,
+            "model": sentiment_model.model_id,
+            "error": sentiment_model.load_error or None,
+        },
     }

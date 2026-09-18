@@ -14,6 +14,7 @@ API 规范:
 环境变量:
     MULTIMODAL_BASE_URL   — 多模态服务基地址 (默认 http://localhost:8001)
     MULTIMODAL_VISION_PATH — 面部分析路径 (默认 /v1/vision/analyze-face)
+    TEXT_SENTIMENT_BASE_URL — 文本模型服务基地址 (默认与多模态地址相同)
     MULTIMODAL_TEXT_PATH   — 文本分析路径 (默认 /v1/text/analyze-sentiment)
     MULTIMODAL_AUDIO_PATH  — 语音分析路径 (默认 /v1/audio/analyze-prosody)
 """
@@ -45,6 +46,10 @@ class EmotionFeatures:
     pitch_variance: Optional[float] = None
     text_sentiment: str = ""
     text_emotion_labels: List[str] = field(default_factory=list)
+    text_confidence: Optional[float] = None
+    text_intensity: Optional[float] = None
+    text_scores: Dict[str, float] = field(default_factory=dict)
+    text_model: str = ""
     available_modalities: List[str] = field(default_factory=list)
     error_modalities: Dict[str, str] = field(default_factory=dict)
 
@@ -59,6 +64,10 @@ class EmotionFeatures:
             "pitch_variance": self.pitch_variance,
             "text_sentiment": self.text_sentiment,
             "text_emotion_labels": self.text_emotion_labels,
+            "text_confidence": self.text_confidence,
+            "text_intensity": self.text_intensity,
+            "text_scores": self.text_scores,
+            "text_model": self.text_model,
             "available_modalities": self.available_modalities,
             "error_modalities": self.error_modalities,
         }
@@ -77,6 +86,8 @@ class EmotionFeatures:
             parts.append(f"text_sentiment={self.text_sentiment}")
         if self.text_emotion_labels:
             parts.append(f"text_emotions={','.join(self.text_emotion_labels)}")
+        if self.text_confidence is not None:
+            parts.append(f"text_confidence={self.text_confidence:.2f}")
         return "; ".join(parts) if parts else "(无多模态数据)"
 
 
@@ -110,6 +121,7 @@ class MultimodalClient:
         self._base_url = base_url or os.getenv(
             "MULTIMODAL_BASE_URL", self._DEFAULT_BASE_URL
         )
+        self._text_base_url = os.getenv("TEXT_SENTIMENT_BASE_URL", self._base_url)
         self._timeout = timeout
 
         self._vision_path = os.getenv(
@@ -138,7 +150,13 @@ class MultimodalClient:
                 text_result = self._analyze_text(text)
                 features.text_sentiment = text_result.get("sentiment", "")
                 features.text_emotion_labels = text_result.get("emotions", [])
-                if features.text_sentiment == "positive":
+                features.text_confidence = text_result.get("confidence")
+                features.text_intensity = text_result.get("intensity")
+                features.text_scores = text_result.get("scores", {})
+                features.text_model = text_result.get("model", "")
+                if text_result.get("valence") is not None:
+                    features.valence = float(text_result["valence"])
+                elif features.text_sentiment == "positive":
                     features.valence = features.valence or 0.6
                 elif features.text_sentiment == "negative":
                     features.valence = features.valence or -0.6
@@ -172,9 +190,15 @@ class MultimodalClient:
 
     # ── HTTP helpers ───────────────────────────────────────────────────────
 
-    def _http_post(self, path: str, body: bytes | str, headers: Dict[str, str]) -> Dict[str, Any]:
+    def _http_post(
+        self,
+        path: str,
+        body: bytes | str,
+        headers: Dict[str, str],
+        base_url: str | None = None,
+    ) -> Dict[str, Any]:
         """带重试的 HTTP POST."""
-        parsed = urlparse(self._base_url)
+        parsed = urlparse(base_url or self._base_url)
         host = parsed.hostname or "localhost"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
@@ -216,6 +240,7 @@ class MultimodalClient:
             self._text_path,
             json.dumps({"text": text}),
             {"Content-Type": "application/json"},
+            self._text_base_url,
         )
         data = raw.get("data", raw) if isinstance(raw, dict) else {}
         return data if isinstance(data, dict) else {}

@@ -458,9 +458,10 @@ class CounselingOrchestrator:
     # 3b. understand — LLM 意图识别 + 情绪分类 ──────────────────────────────
 
     def _understand_node(self, state: CounselingState) -> CounselingState:
-        """Node 2 — 理解: 纯 LLM 推理, 识别用户意图和情绪类别.
+        """Node 2 — 理解: LLM 识别意图，真实模型提供情绪标签.
 
-        不调用外部服务——意图识别和情绪分类是 LLM 擅长的高层次推理任务.
+        感知节点已调用本地中文情绪分类模型。LLM 负责综合上下文和识别
+        意图，但不得覆盖模型情绪；仅在模型不可用时才使用 LLM 标签降级。
         """
         t0 = time.time()
         log = list(state.get("execution_log", []))
@@ -475,16 +476,25 @@ class CounselingOrchestrator:
             f"多模态情绪特征: {emotion_summary}\n"
             f"对话历史轮数: {len(state.get('conversation_history', []))}\n"
             f"会话情绪摘要: {state.get('emotion_summary', '') or '(无)'}\n"
-            "\n请输出意图标签、情绪标签和简短概括."
+            "\n请识别意图并简短概括。emotion 字段必须原样采用多模态特征中的 "
+            "text_sentiment；只有该字段缺失时才允许根据文本判断。"
         )
 
         try:
             raw = self._agent_call(self.understand_agent, prompt)
             parsed = self._parse_understand_output(raw)
 
+            candidate_emotion = ef.text_sentiment.strip() if ef.text_sentiment else ""
+            # positive/negative/mixed are legacy coarse labels from the removed
+            # keyword baseline. Keep LLM fallback for those old clients; the new
+            # transformer returns a concrete frontend-compatible emotion.
+            model_emotion = candidate_emotion if candidate_emotion not in {
+                "positive", "negative", "mixed",
+            } else ""
+            final_emotion = model_emotion or parsed["emotion"]
             log.append(
                 f"understand intent={parsed['intent']} "
-                f"emotion={parsed['emotion']}"
+                f"emotion={final_emotion} source={'model' if model_emotion else 'llm-fallback'}"
             )
 
             react_trace = self._append_react(
@@ -493,15 +503,15 @@ class CounselingOrchestrator:
                 action="understand_intent_classify",
                 observation=(
                     f"intent={parsed['intent']}, "
-                    f"emotion={parsed['emotion']}"
+                    f"emotion={final_emotion}"
                 ),
             )
 
-            logger.info("understand elapsed=%.2fs intent=%s emotion=%s", time.time() - t0, parsed["intent"], parsed["emotion"])
+            logger.info("understand elapsed=%.2fs intent=%s emotion=%s", time.time() - t0, parsed["intent"], final_emotion)
 
             return {
                 "user_intent": parsed["intent"],
-                "emotion_label": parsed["emotion"],
+                "emotion_label": final_emotion,
                 "status": "retrieving",
                 "execution_log": log,
                 "react_trace": react_trace,
@@ -516,9 +526,13 @@ class CounselingOrchestrator:
                 observation=str(exc),
             )
             logger.warning("understand elapsed=%.2fs error=%s", time.time() - t0, exc)
+            candidate_emotion = ef.text_sentiment.strip() if ef.text_sentiment else ""
+            model_emotion = candidate_emotion if candidate_emotion not in {
+                "positive", "negative", "mixed",
+            } else ""
             return {
                 "user_intent": "unclear",
-                "emotion_label": "neutral",
+                "emotion_label": model_emotion or "neutral",
                 "status": "retrieving",
                 "execution_log": log,
                 "react_trace": react_trace,
