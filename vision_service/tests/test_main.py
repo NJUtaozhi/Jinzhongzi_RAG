@@ -205,14 +205,3 @@ def test_no_face_returns_40010_without_crash(monkeypatch):
     )
     assert response.status_code == 400
     assert response.json()["code"] == 40010
-
-
-def test_text_sentiment_compatibility_route():
-    import main
-
-    response = TestClient(main.app).post(
-        "/v1/text/analyze-sentiment",
-        json={"text": "最近失眠而且很焦虑"},
-    )
-    assert response.status_code == 200
-    assert response.json()["data"]["sentiment"] == "negative"

@@ -486,6 +486,51 @@
         "security": []
       }
     },
+    "/v1/text/analyze-sentiment": {
+      "post": {
+        "summary": "中文文本情绪模型分析",
+        "description": "使用离线 Transformer 模型推理，不使用关键词或 LLM 代替。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text"],
+                "properties": {"text": {"type": "string", "minLength": 1}}
+              },
+              "example": {"text": "我最近很害怕，也有些难过"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "真实模型推理成功",
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": 200,
+                  "msg": "success",
+                  "data": {
+                    "sentiment": "fear",
+                    "emotions": ["fear", "sadness"],
+                    "confidence": 0.96,
+                    "intensity": 0.96,
+                    "valence": -0.75,
+                    "scores": {"fear": 0.96, "sadness": 0.61},
+                    "method": "transformer-model",
+                    "model": "LXDaugh/chinese-6-emotion-model",
+                    "latency_ms": 180.0
+                  }
+                }
+              }
+            }
+          },
+          "400": {"description": "文本为空（业务码 40013）"},
+          "503": {"description": "离线模型未部署（业务码 50310）"}
+        }
+      }
+    },
     "/v1/vision/analyze-face": {
       "post": {
         "summary": "面部动作单元（AU）分析",

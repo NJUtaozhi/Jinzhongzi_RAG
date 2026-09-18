@@ -139,6 +139,7 @@ perceive → understand → retrieve → reason → safety → respond
 | POST | `/chat` | JSON | 单轮心理健康辅导对话 |
 | POST | `/chat/stream` | SSE | 流式对话 |
 | POST | `/v1/agent/analyze` | multipart | 前端兼容路由（text + image） |
+| POST | `/v1/text/analyze-sentiment` | JSON | 本地中文 Transformer 情绪分类（Knowledge :8002） |
 
 ### `/chat` 请求示例
 
@@ -191,6 +192,7 @@ POST /chat
 ```bash
 python tests/test_pure.py           # 28 个纯逻辑测试
 python tests/test_state_machine.py  # 33 个 Mock 状态机测试
+python -m pytest knowledge_service/tests/test_sentiment_model.py knowledge_service/tests/test_sentiment_api.py -q
 ```
 
 GitHub Actions CI 会在每次 push 到 `main` 分支时自动运行。
@@ -227,3 +229,13 @@ GitHub Actions CI 会在每次 push 到 `main` 分支时自动运行。
 - 前端支持 PHQ-9 和 GAD-7 逐题填写、计分与分级，提交字段为 `assessment` JSON。
 - PHQ-9 总分 ≥15 或第 9 题 ≥1 时，Agent 使用确定性规则触发危机转介，提供 12355、400-161-9995 与就近就医建议。
 - `/v1/agent/analyze` 返回真实 `AU12_r`、`AU04_r`、完整 AU 字典及知识来源，不再使用占位值。
+
+## Week 7：真实文本情绪模型
+
+- `/v1/text/analyze-sentiment` 已由关键词占位实现升级为本地中文 Transformer 模型。
+- 模型部署在 Knowledge 容器，通过 `TEXT_SENTIMENT_BASE_URL` 与 Vision 服务解耦；不新增容器、不占用 OpenFace 内存。
+- 输出包含主情绪、候选情绪、置信度、强度、效价、完整分数、模型名称与推理耗时，标签兼容前端 14 类映射。
+- Agent 的理解节点以模型情绪为依据，LLM 只负责意图、上下文综合与表达；模型不可用时保留原有降级路径。
+- 服务器禁止在线下载。先在联网电脑运行 `python scripts/download_sentiment_model.py`，再上传 `models/chinese-emotion/`。
+- 模型选择、限制和对照记录见 `MODEL_SELECTION.md`。
+- 服务器部署后运行 `bash scripts/verify_week7.sh`，并按 `TASK7_1_COMPLETION.md` 完成资源与全链路终验。

@@ -8,7 +8,6 @@ import shutil
 import logging
 import time
 from pathlib import Path
-from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # 结构化日志
@@ -128,40 +127,6 @@ def parse_openface_csv(csv_path):
                         au_dict[au_name] = 0.0
                 return au_dict
     return None
-
-
-class TextRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=5000)
-
-
-@app.post("/v1/text/analyze-sentiment")
-async def analyze_text_sentiment(req: TextRequest):
-    """Lightweight local text signal used when the Agent has no model endpoint.
-
-    This is intentionally a transparent keyword baseline, not a clinical model.
-    """
-    text = req.text.strip()
-    negative_terms = ("焦虑", "难过", "失眠", "害怕", "压力", "痛苦", "绝望", "自伤", "轻生")
-    positive_terms = ("开心", "高兴", "轻松", "希望", "感谢", "不错", "幸福")
-    matched_negative = [term for term in negative_terms if term in text]
-    matched_positive = [term for term in positive_terms if term in text]
-    if len(matched_negative) > len(matched_positive):
-        sentiment = "negative"
-    elif len(matched_positive) > len(matched_negative):
-        sentiment = "positive"
-    elif matched_negative or matched_positive:
-        sentiment = "mixed"
-    else:
-        sentiment = "neutral"
-    return {
-        "code": 200,
-        "msg": "success",
-        "data": {
-            "sentiment": sentiment,
-            "emotions": matched_negative + matched_positive,
-            "method": "keyword-baseline",
-        },
-    }
 
 
 @app.post("/v1/vision/analyze-face")
