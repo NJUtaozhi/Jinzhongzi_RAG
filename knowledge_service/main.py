@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
 
+
+def _extract_title(line: str) -> str:
+    """提取条目标题：行首连续的 [标签] 组（与检索侧标题融合逻辑的匹配方式一致）。"""
+    match = re.match(r"^(?:\[[^\]\[]+\])+", line)
+    return match.group(0) if match else line[:20]
+
+
 # ===== 初始化（整合远程同步逻辑）=====
 try:
     logger.info("Loading vector model...")
@@ -31,28 +38,44 @@ try:
     KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
     chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
     
-    collection = chroma_client.get_collection(name="mental_health_knowledge")
-    title_collection = chroma_client.get_collection(name="mental_health_knowledge_titles")
+    collection = chroma_client.get_or_create_collection(name="mental_health_knowledge")
+    title_collection = chroma_client.get_or_create_collection(name="mental_health_knowledge_titles")
     
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
     
-    # ===== 知识库自动同步（来自远程版本）=====
+    # ===== 知识库自动同步（主集合 + 标题集合）=====
     try:
         KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
         with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if lines and collection.count() != len(lines):
-            logger.info(
-                "Synchronizing knowledge base: %s -> %s records...",
-                collection.count(),
-                len(lines),
-            )
+        if lines:
             ids = [f"doc_{i+1}" for i in range(len(lines))]
-            embeddings = [model.encode(text).tolist() for text in lines]
-            collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
-            logger.info("Knowledge base synchronized: %s records.", collection.count())
-        elif not lines:
+            if collection.count() != len(lines):
+                logger.info(
+                    "Synchronizing knowledge base: %s -> %s records...",
+                    collection.count(),
+                    len(lines),
+                )
+                embeddings = [model.encode(text).tolist() for text in lines]
+                collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
+                logger.info("Knowledge base synchronized: %s records.", collection.count())
+            # 标题集合：供标题加权检索（融合权重 0.7），此前从未有人填充
+            titles = [_extract_title(text) for text in lines]
+            if title_collection.count() != len(titles):
+                logger.info(
+                    "Synchronizing title collection: %s -> %s records...",
+                    title_collection.count(),
+                    len(titles),
+                )
+                title_embeddings = [model.encode(title).tolist() for title in titles]
+                title_collection.upsert(
+                    documents=titles, ids=ids, embeddings=title_embeddings
+                )
+                logger.info(
+                    "Title collection synchronized: %s records.", title_collection.count()
+                )
+        else:
             logger.warning("knowledge_data.txt is empty, no records added.")
     except FileNotFoundError:
         logger.error("knowledge_data.txt not found! Auto-sync skipped.")
