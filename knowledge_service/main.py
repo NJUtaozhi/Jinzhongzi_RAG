@@ -22,53 +22,35 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
 
-# ===== 初始化（整合远程同步逻辑）=====
+# ===== 初始化 =====
 try:
     logger.info("Loading vector model...")
     model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-    
+
     BASE_DIR = Path(__file__).parent.absolute()
     KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
     chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
-    
+
     collection = chroma_client.get_collection(name="mental_health_knowledge")
-    title_collection = chroma_client.get_collection(name="mental_health_knowledge_titles")
-    
+    tag1_collection = chroma_client.get_collection(name="mental_health_knowledge_tag1")
+    tag2_collection = chroma_client.get_collection(name="mental_health_knowledge_tag2")
+
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
-    
-    # ===== 知识库自动同步（来自远程版本）=====
-    try:
-        KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
-        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f if line.strip()]
-        if lines and collection.count() != len(lines):
-            logger.info(
-                "Synchronizing knowledge base: %s -> %s records...",
-                collection.count(),
-                len(lines),
-            )
-            ids = [f"doc_{i+1}" for i in range(len(lines))]
-            embeddings = [model.encode(text).tolist() for text in lines]
-            collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
-            logger.info("Knowledge base synchronized: %s records.", collection.count())
-        elif not lines:
-            logger.warning("knowledge_data.txt is empty, no records added.")
-    except FileNotFoundError:
-        logger.error("knowledge_data.txt not found! Auto-sync skipped.")
-    except Exception as e:
-        logger.error("Knowledge synchronization failed: %s", str(e))
-    
+
 except Exception as e:
     logger.error(f"Service initialization failed: {str(e)}")
     logger.error(traceback.format_exc())
     model = None
     collection = None
-    title_collection = None
+    tag1_collection = None
+    tag2_collection = None
+
 
 class RetrieveRequest(BaseModel):
     query: str
     top_k: int = 5
+
 
 def preprocess_query(query: str) -> str:
     """将疑问句转为陈述语气"""
@@ -79,33 +61,50 @@ def preprocess_query(query: str) -> str:
     query = query.replace("怎么", "方法")
     return query.strip()
 
+
 def extract_source(text: str) -> str:
-    """
-    从知识条目文本中提取【来源：xxx】标签。
-    同时支持【】和[]两种括号格式（来自远程版本的改进）。
-    """
-    match = re.search(r'[【\[]来源：([^】\]]+)[】\]]', text)
+    """从知识条目文本中提取【来源：xxx】标签"""
+    match = re.search(r'【来源：([^】]+)】', text)
     if match:
         return match.group(1).strip()
     return "Mental Health Knowledge Base"
 
-def split_source(text: str) -> tuple[str, str]:
-    """拆分正文与行尾来源标签，避免把标记重复显示给前端。"""
-    source = extract_source(text)
-    content = re.sub(r'\s*【来源：[^】]+】\s*$', '', text).strip()
-    return content, source
+
+def extract_tags(text: str):
+    """从知识条目文本中提取标签一和标签二"""
+    match = re.match(r'^((?:\[[^\]]+\])+)', text)
+    if not match:
+        return "", ""
+    tags = re.findall(r'\[([^\]]+)\]', match.group(1))
+    tag1 = tags[0] if len(tags) > 0 else ""
+    tag2 = tags[1] if len(tags) > 1 else ""
+    return tag1, tag2
+
+
+# ===== 融合权重 =====
+W_CONTENT = 0.3
+W_TAG1 = 0.2
+W_TAG2 = 0.5
+
+# 标题（标签）匹配加成阈值
+TAG_BONUS_THRESHOLD = 0.1
+TAG_BONUS_FACTOR = 1.05
+
+# 召回倍数
+RECALL_MULTIPLIER = 6
+
 
 @app.post("/v1/knowledge/retrieve")
 async def retrieve_knowledge(req: RetrieveRequest):
     """
-    语义检索：接收查询文本，返回最相关的知识片段。
-    采用双路检索 + 结果融合：
+    语义检索：三路检索 + 加权融合。
     - 路径1：正文语义检索（权重 0.3）
-    - 路径2：标题向量检索（权重 0.7）
+    - 路径2：标签一向量检索（权重 0.2）
+    - 路径3：标签二向量检索（权重 0.5）
     """
     start_time = time.perf_counter()
     logger.info(f"Query received: {req.query}, top_k: {req.top_k}")
-    
+
     if model is None or collection is None:
         logger.error("Service not initialized properly")
         return JSONResponse(
@@ -116,7 +115,7 @@ async def retrieve_knowledge(req: RetrieveRequest):
                 "data": None
             }
         )
-    
+
     if not req.query or not req.query.strip():
         logger.warning("Empty query received")
         return JSONResponse(
@@ -127,86 +126,151 @@ async def retrieve_knowledge(req: RetrieveRequest):
                 "data": None
             }
         )
-    
+
     if req.top_k < 1:
         logger.warning(f"Invalid top_k: {req.top_k}, using default 5")
         req.top_k = 5
-    
+
     try:
         clean_query = preprocess_query(req.query)
         logger.debug(f"Cleaned query: {clean_query}")
-        
-        query_embedding = model.encode(clean_query).tolist()
-        
-        # ===== 路径1：正文语义检索 =====
-        content_results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(req.top_k * 3, collection.count() or 1)
-        )
-        
-        # ===== 路径2：标题向量检索 =====
+
+        # ===== 向量化查询 =====
         try:
-            title_results = title_collection.query(
+            query_embedding = model.encode(clean_query).tolist()
+        except Exception as e:
+            logger.error(f"Model encoding failed: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "code": 50001,
+                    "msg": f"查询向量化失败: {str(e)}",
+                    "data": None
+                }
+            )
+
+        recall_n = req.top_k * RECALL_MULTIPLIER
+
+        # ===== 路径1：正文语义检索 =====
+        try:
+            content_results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(req.top_k * 3, title_collection.count() or 1)
+                n_results=min(recall_n, collection.count() or 1),
+                include=["documents", "distances", "metadatas"]
             )
         except Exception as e:
-            logger.error(f"Title query failed: {str(e)}")
-            title_results = None
-        
-        # ===== 结果融合 =====
-        fused = {}
-        
-        if content_results and content_results.get("documents") and content_results["documents"][0]:
-            for doc, distance in zip(content_results["documents"][0], content_results["distances"][0]):
-                key = doc
-                similarity = 1 / (1 + distance)
-                fused[key] = {
-                    "doc": doc,
-                    "score_content": similarity,
-                    "score_title": 0.0
+            logger.error(f"Content query failed: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "code": 50002,
+                    "msg": f"知识库检索失败: {str(e)}",
+                    "data": None
                 }
-        
-        if title_results and title_results.get("documents") and title_results["documents"][0]:
-            for title_doc, distance in zip(title_results["documents"][0], title_results["distances"][0]):
+            )
+
+        # ===== 路径2：标签一向量检索 =====
+        try:
+            tag1_results = tag1_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(recall_n, tag1_collection.count() or 1),
+                include=["documents", "distances"]
+            )
+        except Exception as e:
+            logger.error(f"Tag1 query failed: {str(e)}")
+            tag1_results = None
+
+        # ===== 路径3：标签二向量检索 =====
+        try:
+            tag2_results = tag2_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(recall_n, tag2_collection.count() or 1),
+                include=["documents", "distances"]
+            )
+        except Exception as e:
+            logger.error(f"Tag2 query failed: {str(e)}")
+            tag2_results = None
+
+        # ===== 结果融合 =====
+        # key: 正文文档内容（作为唯一标识）
+        fused = {}
+
+        # 处理正文检索结果，建立主索引
+        if content_results and content_results.get("documents") and content_results["documents"][0]:
+            docs = content_results["documents"][0]
+            distances = content_results["distances"][0]
+            metas = content_results["metadatas"][0] if content_results.get("metadatas") else [{}] * len(docs)
+
+            for doc, distance, meta in zip(docs, distances, metas):
                 similarity = 1 / (1 + distance)
-                for key in list(fused.keys()):
-                    if key.startswith(title_doc) or title_doc in key:
-                        fused[key]["score_title"] = similarity
-                        break
-        
-        # ===== 计算最终得分并组装返回结果 =====
-        WEIGHT_CONTENT = 0.3
-        WEIGHT_TITLE = 0.7
-        
+                fused[doc] = {
+                    "doc": doc,
+                    "tag1": meta.get("tag1", ""),
+                    "tag2": meta.get("tag2", ""),
+                    "score_content": similarity,
+                    "score_tag1": 0.0,
+                    "score_tag2": 0.0
+                }
+
+        # 处理标签一检索结果
+        if tag1_results and tag1_results.get("documents") and tag1_results["documents"][0]:
+            tag1_docs = tag1_results["documents"][0]
+            tag1_distances = tag1_results["distances"][0]
+            for tag1_text, distance in zip(tag1_docs, tag1_distances):
+                similarity = 1 / (1 + distance)
+                # 用标签一去匹配 fused 中所有 tag1 相同的条目
+                for key, data in fused.items():
+                    if data["tag1"] and data["tag1"] == tag1_text:
+                        # 保留最高相似度
+                        if similarity > data["score_tag1"]:
+                            data["score_tag1"] = similarity
+
+        # 处理标签二检索结果
+        if tag2_results and tag2_results.get("documents") and tag2_results["documents"][0]:
+            tag2_docs = tag2_results["documents"][0]
+            tag2_distances = tag2_results["distances"][0]
+            for tag2_text, distance in zip(tag2_docs, tag2_distances):
+                similarity = 1 / (1 + distance)
+                for key, data in fused.items():
+                    if data["tag2"] and data["tag2"] == tag2_text:
+                        if similarity > data["score_tag2"]:
+                            data["score_tag2"] = similarity
+
+        # ===== 计算最终得分 =====
         items = []
         for key, data in fused.items():
-            final_score = WEIGHT_CONTENT * data["score_content"] + WEIGHT_TITLE * data["score_title"]
-            if data["score_title"] > 0.1:
-                final_score = final_score * 1.05
+            final_score = (
+                W_CONTENT * data["score_content"]
+                + W_TAG1 * data["score_tag1"]
+                + W_TAG2 * data["score_tag2"]
+            )
+
+            # 标签匹配加成
+            if data["score_tag1"] > TAG_BONUS_THRESHOLD or data["score_tag2"] > TAG_BONUS_THRESHOLD:
+                final_score = final_score * TAG_BONUS_FACTOR
+
             final_score = min(final_score, 1.0)
-            
-            # 使用 split_source 清理来源标签
-            content_clean, source = split_source(data["doc"])
-            
+
             items.append({
-                "content": content_clean,
-                "source": source,
+                "content": data["doc"],
+                "tag1": data["tag1"],
+                "tag2": data["tag2"],
+                "source": extract_source(data["doc"]),
                 "score": round(final_score, 4)
             })
-        
+
         items.sort(key=lambda x: x["score"], reverse=True)
         items = items[:req.top_k]
-        
+
         elapsed = time.perf_counter() - start_time
         logger.info(f"Query completed: {len(items)} hits, {elapsed:.3f}s")
-        
+
         return {
             "code": 200,
             "msg": "success",
             "results": items
         }
-        
+
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
@@ -218,6 +282,7 @@ async def retrieve_knowledge(req: RetrieveRequest):
                 "data": None
             }
         )
+
 
 @app.get("/health")
 def health_check():
@@ -235,5 +300,7 @@ def health_check():
     return {
         "status": "ok",
         "service": "knowledge-retrieval",
-        "doc_count": collection.count()
+        "doc_count": collection.count(),
+        "tag1_count": tag1_collection.count() if tag1_collection else 0,
+        "tag2_count": tag2_collection.count() if tag2_collection else 0
     }
