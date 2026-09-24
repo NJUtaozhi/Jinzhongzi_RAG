@@ -70,12 +70,12 @@ def test_unknown_tool_graceful():
 
 def test_crisis_intervention_has_hotline():
     from tools.counseling_tools import execute_counseling_tool
-    # high 级别有 010 热线
+    # high 级别有 12355 热线
     r = execute_counseling_tool(
         "crisis_intervention",
         {"risk_level": "high", "crisis_signals": "自杀念头"},
     )
-    assert "010-82951332" in r["content"]
+    assert "12355" in r["content"]
 
     # immediate 级别有 400 热线
     r2 = execute_counseling_tool(

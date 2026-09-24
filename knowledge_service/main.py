@@ -22,7 +22,19 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Knowledge Retrieval Service")
 
-# ===== 初始化 =====
+
+def extract_tags(line: str):
+    """提取条目开头的连续 [标签] 组，返回 tag1 和 tag2。"""
+    match = re.match(r"^((?:\[[^\]\[]+\])+)", line)
+    if not match:
+        return "", ""
+    tags = re.findall(r'\[([^\]]+)\]', match.group(1))
+    tag1 = tags[0] if len(tags) > 0 else ""
+    tag2 = tags[1] if len(tags) > 1 else ""
+    return tag1, tag2
+
+
+# ===== 初始化（整合远程同步逻辑 + 你的三标签架构）=====
 try:
     logger.info("Loading vector model...")
     model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
@@ -31,12 +43,77 @@ try:
     KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
     chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
 
-    collection = chroma_client.get_collection(name="mental_health_knowledge")
-    tag1_collection = chroma_client.get_collection(name="mental_health_knowledge_tag1")
-    tag2_collection = chroma_client.get_collection(name="mental_health_knowledge_tag2")
+    # 使用 get_or_create_collection 避免服务启动崩溃
+    collection = chroma_client.get_or_create_collection(name="mental_health_knowledge")
+    tag1_collection = chroma_client.get_or_create_collection(name="mental_health_knowledge_tag1")
+    tag2_collection = chroma_client.get_or_create_collection(name="mental_health_knowledge_tag2")
 
     doc_count = collection.count()
     logger.info(f"Knowledge base ready, {doc_count} records.")
+
+    # ===== 知识库自动同步（主集合 + 标签一 + 标签二）=====
+    try:
+        KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
+        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        if lines:
+            ids = [f"doc_{i+1}" for i in range(len(lines))]
+
+            # 同步主集合
+            if collection.count() != len(lines):
+                logger.info(
+                    "Synchronizing knowledge base: %s -> %s records...",
+                    collection.count(),
+                    len(lines),
+                )
+                embeddings = [model.encode(text).tolist() for text in lines]
+                collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
+                logger.info("Knowledge base synchronized: %s records.", collection.count())
+
+            # 提取标签
+            tag1_list = []
+            tag2_list = []
+            for text in lines:
+                t1, t2 = extract_tags(text)
+                tag1_list.append(t1)
+                tag2_list.append(t2)
+
+            # 同步标签一集合
+            unique_tag1 = list(dict.fromkeys([t for t in tag1_list if t]))  # 去重保序
+            if tag1_collection.count() != len(unique_tag1):
+                logger.info(
+                    "Synchronizing tag1 collection: %s -> %s records...",
+                    tag1_collection.count(),
+                    len(unique_tag1),
+                )
+                tag1_ids = [f"tag1_{i+1}" for i in range(len(unique_tag1))]
+                tag1_embeddings = [model.encode(t).tolist() for t in unique_tag1]
+                tag1_collection.upsert(
+                    documents=unique_tag1, ids=tag1_ids, embeddings=tag1_embeddings
+                )
+                logger.info("Tag1 collection synchronized: %s records.", tag1_collection.count())
+
+            # 同步标签二集合
+            unique_tag2 = list(dict.fromkeys([t for t in tag2_list if t]))
+            if tag2_collection.count() != len(unique_tag2):
+                logger.info(
+                    "Synchronizing tag2 collection: %s -> %s records...",
+                    tag2_collection.count(),
+                    len(unique_tag2),
+                )
+                tag2_ids = [f"tag2_{i+1}" for i in range(len(unique_tag2))]
+                tag2_embeddings = [model.encode(t).tolist() for t in unique_tag2]
+                tag2_collection.upsert(
+                    documents=unique_tag2, ids=tag2_ids, embeddings=tag2_embeddings
+                )
+                logger.info("Tag2 collection synchronized: %s records.", tag2_collection.count())
+        else:
+            logger.warning("knowledge_data.txt is empty, no records added.")
+    except FileNotFoundError:
+        logger.error("knowledge_data.txt not found! Auto-sync skipped.")
+    except Exception as e:
+        logger.error("Knowledge synchronization failed: %s", str(e))
 
 except Exception as e:
     logger.error(f"Service initialization failed: {str(e)}")
@@ -68,17 +145,6 @@ def extract_source(text: str) -> str:
     if match:
         return match.group(1).strip()
     return "Mental Health Knowledge Base"
-
-
-def extract_tags(text: str):
-    """从知识条目文本中提取标签一和标签二"""
-    match = re.match(r'^((?:\[[^\]]+\])+)', text)
-    if not match:
-        return "", ""
-    tags = re.findall(r'\[([^\]]+)\]', match.group(1))
-    tag1 = tags[0] if len(tags) > 0 else ""
-    tag2 = tags[1] if len(tags) > 1 else ""
-    return tag1, tag2
 
 
 # ===== 融合权重 =====
@@ -135,7 +201,6 @@ async def retrieve_knowledge(req: RetrieveRequest):
         clean_query = preprocess_query(req.query)
         logger.debug(f"Cleaned query: {clean_query}")
 
-        # ===== 向量化查询 =====
         try:
             query_embedding = model.encode(clean_query).tolist()
         except Exception as e:
@@ -192,10 +257,8 @@ async def retrieve_knowledge(req: RetrieveRequest):
             tag2_results = None
 
         # ===== 结果融合 =====
-        # key: 正文文档内容（作为唯一标识）
         fused = {}
 
-        # 处理正文检索结果，建立主索引
         if content_results and content_results.get("documents") and content_results["documents"][0]:
             docs = content_results["documents"][0]
             distances = content_results["distances"][0]
@@ -212,20 +275,16 @@ async def retrieve_knowledge(req: RetrieveRequest):
                     "score_tag2": 0.0
                 }
 
-        # 处理标签一检索结果
         if tag1_results and tag1_results.get("documents") and tag1_results["documents"][0]:
             tag1_docs = tag1_results["documents"][0]
             tag1_distances = tag1_results["distances"][0]
             for tag1_text, distance in zip(tag1_docs, tag1_distances):
                 similarity = 1 / (1 + distance)
-                # 用标签一去匹配 fused 中所有 tag1 相同的条目
                 for key, data in fused.items():
                     if data["tag1"] and data["tag1"] == tag1_text:
-                        # 保留最高相似度
                         if similarity > data["score_tag1"]:
                             data["score_tag1"] = similarity
 
-        # 处理标签二检索结果
         if tag2_results and tag2_results.get("documents") and tag2_results["documents"][0]:
             tag2_docs = tag2_results["documents"][0]
             tag2_distances = tag2_results["distances"][0]
@@ -245,7 +304,6 @@ async def retrieve_knowledge(req: RetrieveRequest):
                 + W_TAG2 * data["score_tag2"]
             )
 
-            # 标签匹配加成
             if data["score_tag1"] > TAG_BONUS_THRESHOLD or data["score_tag2"] > TAG_BONUS_THRESHOLD:
                 final_score = final_score * TAG_BONUS_FACTOR
 

@@ -149,13 +149,16 @@ class RAGClient:
     # ── parsing ────────────────────────────────────────────────────────────
 
     def _parse_response(self, raw: Dict[str, Any]) -> List[RetrievalResult]:
-        # Knowledge 服务返回 {code, msg, data: {results: [...]}}
-        data = raw.get("data", {})
-        if isinstance(data, dict):
-            items = data.get("results", [])
-        elif isinstance(data, list):
-            items = data
-        else:
+        # 新版 Knowledge 服务: {code, msg, results: [...]}
+        # 旧版兼容:           {code, msg, data: {results: [...]}} 或 {data: [...]}
+        items = raw.get("results")
+        if not items:
+            data = raw.get("data", {})
+            if isinstance(data, dict):
+                items = data.get("results", [])
+            elif isinstance(data, list):
+                items = data
+        if not isinstance(items, list):
             items = []
         docs: List[RetrievalResult] = []
         for item in items:

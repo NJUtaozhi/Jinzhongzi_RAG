@@ -164,7 +164,7 @@ class TestCounselingTools:
             "crisis_intervention",
             {"risk_level": "high", "crisis_signals": "自杀念头"},
         )
-        assert "010-82951332" in result["content"]
+        assert "12355" in result["content"]
 
         # immediate 级别
         result2 = execute_counseling_tool(
@@ -235,7 +235,6 @@ class TestEmotionFeatures:
 # 必须在导入 orchestrator 之前执行.
 import os as _os
 _os.environ.setdefault("DEEPSEEK_API_KEY", "test-fake-key")
-_os.environ.setdefault("TAVILY_API_KEY", "test-fake-key")
 
 from unittest.mock import patch as _patch
 _fake_llm = MagicMock()

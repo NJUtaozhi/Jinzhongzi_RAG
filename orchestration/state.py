@@ -52,6 +52,7 @@ class CounselingState(TypedDict, total=False):
 
     # ── 对话历史 ──
     conversation_history: List[Dict[str, str]]  # [{"role":"user/assistant","content":...}]
+    emotion_summary: str          # 会话情绪摘要记忆（上一轮生成，本轮注入提示词）
 
     # ── 多模态感知结果（Block 1）──
     #    注意: emotion_features 在 state 中以 dict 形式流转
@@ -113,6 +114,7 @@ def default_state(
         "user_query": user_query,
         "session_id": session_id,
         "conversation_history": [],
+        "emotion_summary": "",
         "emotion_features": {},
         "emotion_label": "",
         "assessment": {},

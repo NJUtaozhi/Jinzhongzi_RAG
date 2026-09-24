@@ -142,3 +142,24 @@ class TestKnowledgeRetrieve:
         for item in data["results"]:
             assert item["source"] is not None
             assert len(item["source"]) > 0
+
+class TestTitleCollectionFix:
+    """标题集合修复（任务7 遗留 bug）：初始化不崩溃 + 标题集合自动填充"""
+
+    def test_extract_title_with_leading_tags(self):
+        from main import _extract_title
+        assert _extract_title("[PHQ-9][基本信息] 病人健康问卷（PHQ-9）是...") == "[PHQ-9][基本信息]"
+
+    def test_extract_title_fallback_without_tags(self):
+        from main import _extract_title
+        text = "普通条目没有行首标签时需要兜底处理" * 3
+        assert _extract_title(text) == text[:20]
+
+    def test_title_collection_populated_on_startup(self):
+        """启动同步后，标题集合条目数应与知识文件条数一致"""
+        import main
+        from pathlib import Path
+        kb_file = Path(main.__file__).parent / "knowledge_data.txt"
+        expected = len([l for l in kb_file.read_text(encoding="utf-8").splitlines() if l.strip()])
+        assert main.title_collection is not None, "标题集合未初始化"
+        assert main.title_collection.count() == expected
