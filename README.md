@@ -35,8 +35,8 @@ docker compose up -d --build
 ### 云服务器部署
 
 ```bash
-# 服务器已部署: 146.56.204.132
-# Nginx 统一入口: http://146.56.204.132
+# 服务器已部署（地址见内部文档；公开仓库不记录真实 IP）
+# Nginx 统一入口: http://<SERVER_IP>
 # 各服务端口: 8001 (Vision) / 8002 (Knowledge) / 8003 (Agent) / 8501 (Frontend)
 ```
 
