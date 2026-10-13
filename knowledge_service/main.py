@@ -2,363 +2,399 @@ import os
 import logging
 import time
 import traceback
-import re
 from pathlib import Path
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 import chromadb
 
-# ===== 配置日志 =====
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Knowledge Retrieval Service")
+# ===== 路径与常量 =====
+BASE_DIR = Path(__file__).parent.absolute()
+KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
+COLLECTION_NAME = "mental_health_knowledge"
 
+TOPIC_VOCAB = [
+    "焦虑", "抑郁", "社交焦虑", "学业", "人际", "恋爱", "拖延", "睡眠",
+    "正念", "情绪", "完美主义", "心理韧性", "精神障碍", "职业倦怠",
+    "校园支持", "心理健康", "危机干预",
+]
 
-def extract_tags(line: str):
-    """提取条目开头的连续 [标签] 组，返回 tag1 和 tag2。"""
-    match = re.match(r"^((?:\[[^\]\[]+\])+)", line)
-    if not match:
-        return "", ""
-    tags = re.findall(r'\[([^\]]+)\]', match.group(1))
-    tag1 = tags[0] if len(tags) > 0 else ""
-    tag2 = tags[1] if len(tags) > 1 else ""
-    return tag1, tag2
+CONTENT_TYPE_VOCAB = [
+    "definition", "symptom", "cause", "assessment_tool", "scoring",
+    "management_advice", "coping_strategy", "treatment", "crisis_rule",
+    "referral_resource", "research_data", "misconception",
+    "institutional_recommendation", "usage_note",
+]
 
+# 主题别名表（可扩展）
+TOPIC_ALIASES = {
+    "焦虑": ["焦虑", "紧张", "担心", "恐慌", "心慌", "惊恐"],
+    "抑郁": ["抑郁", "低落", "没兴趣", "想哭", "开心不起来", "情绪低落"],
+    "社交焦虑": ["社交焦虑", "社交恐惧", "社恐"],
+    "学业": ["学业", "学习", "考试", "成绩", "考研", "作业"],
+    "人际": ["人际", "社交", "室友", "朋友", "交往", "宿舍"],
+    "恋爱": ["恋爱", "失恋", "分手", "感情", "伴侣", "依恋"],
+    "拖延": ["拖延", "拖沓", "推迟", "磨蹭"],
+    "睡眠": ["睡眠", "失眠", "睡不着", "早醒", "多梦", "入睡困难"],
+    "正念": ["正念", "冥想", "觉察", "觉知"],
+    "情绪": ["情绪", "内耗", "愤怒", "生气", "发火", "烦躁"],
+    "完美主义": ["完美主义", "完美", "高标准"],
+    "心理韧性": ["心理韧性", "韧性", "复原力", "抗压", "逆境"],
+    "精神障碍": ["精神障碍", "PTSD", "强迫症", "双相", "厌食", "ADHD",
+                 "多动症", "网瘾", "创伤后应激", "季节性情感障碍"],
+    "职业倦怠": ["职业倦怠", "工作倦怠", "burnout"],
+    "校园支持": ["校园支持", "心理咨询中心", "学校支持", "校园氛围"],
+    "心理健康": ["心理健康", "心理亚健康", "心理保健"],
+    "危机干预": ["危机", "自杀", "自伤", "想死", "不想活", "安全计划",
+                 "紧急转介", "危机干预"],
+}
 
-# ===== 初始化（整合远程同步逻辑 + 你的三标签架构）=====
-try:
-    logger.info("Loading vector model...")
-    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+# 内容类型关键词表
+CONTENT_TYPE_KEYWORDS = {
+    "definition": ["是什么", "什么是", "定义", "含义", "概念", "区别"],
+    "symptom": ["症状", "表现", "会有哪些", "有哪些表现", "临床表现"],
+    "cause": ["原因", "为什么", "诱因", "怎么产生", "风险因素"],
+    "assessment_tool": ["量表", "测试", "评估工具", "条目", "题目"],
+    "scoring": ["评分", "分数", "多少分", "分级", "阈值", "切分点", "标准分"],
+    "management_advice": ["怎么办", "如何处理", "管理", "建议", "应对方案", "干预"],
+    "coping_strategy": ["怎么缓解", "方法", "技巧", "应对", "放松"],
+    "treatment": ["治疗", "药物", "疗法", "怎么治"],
+    "crisis_rule": ["自杀", "自伤", "想死", "危机", "紧急", "危险"],
+    "referral_resource": ["热线", "电话", "咨询室", "转介", "预约", "地址"],
+    "research_data": ["研究", "数据", "统计", "流行病学", "灵敏度", "特异度"],
+    "misconception": ["误区", "误解", "错误观念", "误区"],
+    "institutional_recommendation": ["机构", "学校应该", "政策", "建议院校"],
+    "usage_note": ["注意事项", "适用", "局限性", "适用人群"],
+}
 
-    BASE_DIR = Path(__file__).parent.absolute()
-    KB_CHROMA_PATH = BASE_DIR / "kb_chroma_db"
-    chroma_client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
+# 来源权威性权重
+SOURCE_WEIGHT = {
+    "clinical_guideline": 1.0,
+    "original_instrument": 1.0,
+    "peer_reviewed_paper": 0.8,
+    "government_website": 0.7,
+    "institutional_website": 0.6,
+    "encyclopedia": 0.3,
+    "unknown": 0.1,
+}
 
-    # 使用 get_or_create_collection 避免服务启动崩溃
-    collection = chroma_client.get_or_create_collection(name="mental_health_knowledge")
-    tag1_collection = chroma_client.get_or_create_collection(name="mental_health_knowledge_tag1")
-    tag2_collection = chroma_client.get_or_create_collection(name="mental_health_knowledge_tag2")
+# 评分权重
+W_VECTOR = 0.6
+W_SOURCE = 0.2
+W_CONTENT_TYPE = 0.1
+W_TOPIC = 0.1
 
-    doc_count = collection.count()
-    logger.info(f"Knowledge base ready, {doc_count} records.")
-
-    # ===== 知识库自动同步（主集合 + 标签一 + 标签二）=====
-    try:
-        KNOWLEDGE_FILE = BASE_DIR / "knowledge_data.txt"
-        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f if line.strip()]
-
-        if lines:
-            ids = [f"doc_{i+1}" for i in range(len(lines))]
-
-            # 同步主集合
-            if collection.count() != len(lines):
-                logger.info(
-                    "Synchronizing knowledge base: %s -> %s records...",
-                    collection.count(),
-                    len(lines),
-                )
-                embeddings = [model.encode(text).tolist() for text in lines]
-                collection.upsert(documents=lines, ids=ids, embeddings=embeddings)
-                logger.info("Knowledge base synchronized: %s records.", collection.count())
-
-            # 提取标签
-            tag1_list = []
-            tag2_list = []
-            for text in lines:
-                t1, t2 = extract_tags(text)
-                tag1_list.append(t1)
-                tag2_list.append(t2)
-
-            # 同步标签一集合
-            unique_tag1 = list(dict.fromkeys([t for t in tag1_list if t]))  # 去重保序
-            if tag1_collection.count() != len(unique_tag1):
-                logger.info(
-                    "Synchronizing tag1 collection: %s -> %s records...",
-                    tag1_collection.count(),
-                    len(unique_tag1),
-                )
-                tag1_ids = [f"tag1_{i+1}" for i in range(len(unique_tag1))]
-                tag1_embeddings = [model.encode(t).tolist() for t in unique_tag1]
-                tag1_collection.upsert(
-                    documents=unique_tag1, ids=tag1_ids, embeddings=tag1_embeddings
-                )
-                logger.info("Tag1 collection synchronized: %s records.", tag1_collection.count())
-
-            # 同步标签二集合
-            unique_tag2 = list(dict.fromkeys([t for t in tag2_list if t]))
-            if tag2_collection.count() != len(unique_tag2):
-                logger.info(
-                    "Synchronizing tag2 collection: %s -> %s records...",
-                    tag2_collection.count(),
-                    len(unique_tag2),
-                )
-                tag2_ids = [f"tag2_{i+1}" for i in range(len(unique_tag2))]
-                tag2_embeddings = [model.encode(t).tolist() for t in unique_tag2]
-                tag2_collection.upsert(
-                    documents=unique_tag2, ids=tag2_ids, embeddings=tag2_embeddings
-                )
-                logger.info("Tag2 collection synchronized: %s records.", tag2_collection.count())
-        else:
-            logger.warning("knowledge_data.txt is empty, no records added.")
-    except FileNotFoundError:
-        logger.error("knowledge_data.txt not found! Auto-sync skipped.")
-    except Exception as e:
-        logger.error("Knowledge synchronization failed: %s", str(e))
-
-except Exception as e:
-    logger.error(f"Service initialization failed: {str(e)}")
-    logger.error(traceback.format_exc())
-    model = None
-    collection = None
-    tag1_collection = None
-    tag2_collection = None
-
-
-class RetrieveRequest(BaseModel):
-    query: str
-    top_k: int = 5
-
-
-def preprocess_query(query: str) -> str:
-    """将疑问句转为陈述语气"""
-    query = query.replace("？", "").replace("?", "")
-    query = query.replace("是什么", "是")
-    query = query.replace("什么是", "是")
-    query = query.replace("如何", "方法")
-    query = query.replace("怎么", "方法")
-    return query.strip()
-
-
-def extract_source(text: str) -> str:
-    """从知识条目文本中提取【来源：xxx】标签"""
-    match = re.search(r'【来源：([^】]+)】', text)
-    if match:
-        return match.group(1).strip()
-    return "Mental Health Knowledge Base"
-
-
-# ===== 融合权重 =====
-W_CONTENT = 0.3
-W_TAG1 = 0.2
-W_TAG2 = 0.5
-
-# 标题（标签）匹配加成阈值
-TAG_BONUS_THRESHOLD = 0.1
-TAG_BONUS_FACTOR = 1.05
+# 危机条目分数下限
+CRISIS_FLOOR = 0.95
 
 # 召回倍数
 RECALL_MULTIPLIER = 6
 
+# ===== 日志 =====
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("main")
 
+app = FastAPI(title="Knowledge Retrieval Service")
+
+# ===== 初始化 =====
+try:
+    logger.info("Loading vector model...")
+    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+
+    client = chromadb.PersistentClient(path=str(KB_CHROMA_PATH))
+    collection = client.get_collection(name=COLLECTION_NAME)
+
+    logger.info(f"Collection ready, {collection.count()} entries.")
+except Exception as e:
+    logger.error(f"Service init failed: {e}")
+    logger.error(traceback.format_exc())
+    model = None
+    collection = None
+
+
+# ===== 请求模型 =====
+class RetrieveRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    crisis_signal: bool = False  # 上游传入的危机信号
+
+
+# ===== 工具函数 =====
+def preprocess_query(query: str) -> str:
+    """去标点、语气转换。"""
+    query = query.replace("？", "").replace("?", "")
+    query = query.replace("是什么", "是").replace("什么是", "是")
+    return query.strip()
+
+
+def detect_topics(query: str):
+    """识别查询中的主题。返回主题列表（可能为空）。"""
+    found = []
+    for topic, aliases in TOPIC_ALIASES.items():
+        for alias in aliases:
+            if alias in query:
+                found.append(topic)
+                break
+    # 若同时命中宽泛和具体主题，优先具体
+    if "社交焦虑" in found and "焦虑" in found:
+        found.remove("焦虑")
+    if "职业倦怠" in found and "学业" in found:
+        # 二者不冲突，保留
+        pass
+    return found
+
+
+def detect_content_type(query: str):
+    """识别查询的内容类型。返回单个 content_type 或 None。"""
+    # 优先级：危机 > 转介 > 评分 > 评估工具 > 管理建议/应对 > 治疗 > 症状 > 原因 > 定义
+    priority = [
+        "crisis_rule", "referral_resource", "scoring", "assessment_tool",
+        "management_advice", "coping_strategy", "treatment",
+        "symptom", "cause", "definition", "research_data",
+        "misconception", "institutional_recommendation", "usage_note",
+    ]
+    for ct in priority:
+        for kw in CONTENT_TYPE_KEYWORDS.get(ct, []):
+            if kw in query:
+                return ct
+    return None
+
+
+def build_where(topics, content_type):
+    """构造 ChromaDB where 条件。"""
+    conditions = []
+
+    if topics:
+        if len(topics) == 1:
+            conditions.append({f"topic_{topics[0]}": True})
+        else:
+            conditions.append({"$or": [{f"topic_{t}": True} for t in topics]})
+
+    if content_type:
+        conditions.append({"content_type": content_type})
+
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def extract_entry_topics(meta: dict):
+    """从元数据还原 topic 数组。"""
+    return [t for t in TOPIC_VOCAB if meta.get(f"topic_{t}")]
+
+
+def build_result_item(doc_id, doc, distance, meta,
+                      detected_topics, detected_ct):
+    """构造单条结果，含评分与分项。"""
+    sim = 1 / (1 + distance)
+    source_weight = SOURCE_WEIGHT.get(meta.get("source_type", "unknown"), 0.1)
+
+    entry_topics = extract_entry_topics(meta)
+    topic_match = 1.0 if (
+        detected_topics and set(entry_topics) & set(detected_topics)
+    ) else 0.0
+    ct_match = 1.0 if (
+        detected_ct and meta.get("content_type") == detected_ct
+    ) else 0.0
+
+    score = (
+        W_VECTOR * sim
+        + W_SOURCE * source_weight
+        + W_CONTENT_TYPE * ct_match
+        + W_TOPIC * topic_match
+    )
+
+    is_crisis = meta.get("content_type") == "crisis_rule"
+    if is_crisis:
+        score = max(score, CRISIS_FLOOR)
+
+    score = min(score, 1.0)
+
+    return {
+        "id": doc_id,
+        "text": doc,
+        "topic": entry_topics,
+        "content_type": meta.get("content_type"),
+        "source": {
+            "name": meta.get("source_name"),
+            "type": meta.get("source_type"),
+        },
+        "score": round(score, 4),
+        "score_breakdown": {
+            "vector": round(sim, 4),
+            "source": round(source_weight, 4),
+            "content_type_match": ct_match,
+            "topic_match": topic_match,
+        },
+        "is_crisis": is_crisis,
+    }
+
+
+# ===== 检索接口 =====
 @app.post("/v1/knowledge/retrieve")
 async def retrieve_knowledge(req: RetrieveRequest):
-    """
-    语义检索：三路检索 + 加权融合。
-    - 路径1：正文语义检索（权重 0.3）
-    - 路径2：标签一向量检索（权重 0.2）
-    - 路径3：标签二向量检索（权重 0.5）
-    """
     start_time = time.perf_counter()
-    logger.info(f"Query received: {req.query}, top_k: {req.top_k}")
 
     if model is None or collection is None:
-        logger.error("Service not initialized properly")
         return JSONResponse(
             status_code=503,
-            content={
-                "code": 50300,
-                "msg": "知识库服务未就绪，请检查模型或数据库是否正常加载",
-                "data": None
-            }
+            content={"code": 50300, "msg": "知识库服务未就绪", "data": None},
         )
 
     if not req.query or not req.query.strip():
-        logger.warning("Empty query received")
         return JSONResponse(
             status_code=400,
-            content={
-                "code": 40001,
-                "msg": "查询内容不能为空，请提供有效的问题或关键词",
-                "data": None
-            }
+            content={"code": 40001, "msg": "查询内容不能为空", "data": None},
         )
 
-    if req.top_k < 1:
-        logger.warning(f"Invalid top_k: {req.top_k}, using default 5")
-        req.top_k = 5
+    top_k = max(1, req.top_k)
 
     try:
         clean_query = preprocess_query(req.query)
-        logger.debug(f"Cleaned query: {clean_query}")
+        detected_topics = detect_topics(clean_query)
+        detected_ct = detect_content_type(clean_query)
 
-        try:
-            query_embedding = model.encode(clean_query).tolist()
-        except Exception as e:
-            logger.error(f"Model encoding failed: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "code": 50001,
-                    "msg": f"查询向量化失败: {str(e)}",
-                    "data": None
-                }
-            )
+        logger.info(
+            f"Query: {req.query} | topics={detected_topics} | ct={detected_ct} | "
+            f"crisis_signal={req.crisis_signal}"
+        )
 
-        recall_n = req.top_k * RECALL_MULTIPLIER
+        # 向量化
+        query_embedding = model.encode(clean_query).tolist()
+        recall_n = min(top_k * RECALL_MULTIPLIER, max(collection.count(), 1))
 
-        # ===== 路径1：正文语义检索 =====
-        try:
-            content_results = collection.query(
+        # 分级过滤检索
+        results = None
+        used_filter = "none"
+
+        where = build_where(detected_topics, detected_ct)
+        if where is not None:
+            try:
+                r = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=recall_n,
+                    where=where,
+                    include=["documents", "distances", "metadatas"],
+                )
+                if r["documents"] and r["documents"][0]:
+                    results = r
+                    used_filter = "topic+ct" if detected_ct else "topic"
+            except Exception as e:
+                logger.warning(f"Filtered query failed: {e}")
+
+        # 降级一：只按 topic 过滤
+        if results is None and detected_topics:
+            where2 = build_where(detected_topics, None)
+            if where2 is not None:
+                try:
+                    r = collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=recall_n,
+                        where=where2,
+                        include=["documents", "distances", "metadatas"],
+                    )
+                    if r["documents"] and r["documents"][0]:
+                        results = r
+                        used_filter = "topic-only"
+                except Exception as e:
+                    logger.warning(f"Topic-only query failed: {e}")
+
+        # 降级二：全库检索
+        if results is None:
+            results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(recall_n, collection.count() or 1),
-                include=["documents", "distances", "metadatas"]
+                n_results=recall_n,
+                include=["documents", "distances", "metadatas"],
             )
-        except Exception as e:
-            logger.error(f"Content query failed: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "code": 50002,
-                    "msg": f"知识库检索失败: {str(e)}",
-                    "data": None
-                }
-            )
+            used_filter = "full"
 
-        # ===== 路径2：标签一向量检索 =====
-        try:
-            tag1_results = tag1_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(recall_n, tag1_collection.count() or 1),
-                include=["documents", "distances"]
-            )
-        except Exception as e:
-            logger.error(f"Tag1 query failed: {str(e)}")
-            tag1_results = None
+        logger.info(f"Used filter: {used_filter}")
 
-        # ===== 路径3：标签二向量检索 =====
-        try:
-            tag2_results = tag2_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(recall_n, tag2_collection.count() or 1),
-                include=["documents", "distances"]
-            )
-        except Exception as e:
-            logger.error(f"Tag2 query failed: {str(e)}")
-            tag2_results = None
+        # 重排
+        docs = results["documents"][0]
+        distances = results["distances"][0]
+        metas = results["metadatas"][0]
+        ids = results["ids"][0]
 
-        # ===== 结果融合 =====
-        fused = {}
+        items = [
+            build_result_item(i, d, dist, m, detected_topics, detected_ct)
+            for i, d, dist, m in zip(ids, docs, distances, metas)
+        ]
 
-        if content_results and content_results.get("documents") and content_results["documents"][0]:
-            docs = content_results["documents"][0]
-            distances = content_results["distances"][0]
-            metas = content_results["metadatas"][0] if content_results.get("metadatas") else [{}] * len(docs)
-
-            for doc, distance, meta in zip(docs, distances, metas):
-                similarity = 1 / (1 + distance)
-                fused[doc] = {
-                    "doc": doc,
-                    "tag1": meta.get("tag1", ""),
-                    "tag2": meta.get("tag2", ""),
-                    "score_content": similarity,
-                    "score_tag1": 0.0,
-                    "score_tag2": 0.0
-                }
-
-        if tag1_results and tag1_results.get("documents") and tag1_results["documents"][0]:
-            tag1_docs = tag1_results["documents"][0]
-            tag1_distances = tag1_results["distances"][0]
-            for tag1_text, distance in zip(tag1_docs, tag1_distances):
-                similarity = 1 / (1 + distance)
-                for key, data in fused.items():
-                    if data["tag1"] and data["tag1"] == tag1_text:
-                        if similarity > data["score_tag1"]:
-                            data["score_tag1"] = similarity
-
-        if tag2_results and tag2_results.get("documents") and tag2_results["documents"][0]:
-            tag2_docs = tag2_results["documents"][0]
-            tag2_distances = tag2_results["distances"][0]
-            for tag2_text, distance in zip(tag2_docs, tag2_distances):
-                similarity = 1 / (1 + distance)
-                for key, data in fused.items():
-                    if data["tag2"] and data["tag2"] == tag2_text:
-                        if similarity > data["score_tag2"]:
-                            data["score_tag2"] = similarity
-
-        # ===== 计算最终得分 =====
-        items = []
-        for key, data in fused.items():
-            final_score = (
-                W_CONTENT * data["score_content"]
-                + W_TAG1 * data["score_tag1"]
-                + W_TAG2 * data["score_tag2"]
-            )
-
-            if data["score_tag1"] > TAG_BONUS_THRESHOLD or data["score_tag2"] > TAG_BONUS_THRESHOLD:
-                final_score = final_score * TAG_BONUS_FACTOR
-
-            final_score = min(final_score, 1.0)
-
-            items.append({
-                "content": data["doc"],
-                "tag1": data["tag1"],
-                "tag2": data["tag2"],
-                "source": extract_source(data["doc"]),
-                "score": round(final_score, 4)
-            })
+        # 危机信号：强制补充所有 crisis_rule
+        forced_crisis = []
+        if req.crisis_signal:
+            try:
+                cr = collection.get(
+                    where={"content_type": "crisis_rule"},
+                    include=["documents", "metadatas"],
+                )
+                existing_ids = {item["id"] for item in items}
+                for cid, cdoc, cmeta in zip(
+                    cr["ids"], cr["documents"], cr["metadatas"]
+                ):
+                    if cid in existing_ids:
+                        continue
+                    forced_crisis.append({
+                        "id": cid,
+                        "text": cdoc,
+                        "topic": extract_entry_topics(cmeta),
+                        "content_type": cmeta.get("content_type"),
+                        "source": {
+                            "name": cmeta.get("source_name"),
+                            "type": cmeta.get("source_type"),
+                        },
+                        "score": 1.0,
+                        "is_crisis": True,
+                        "forced": True,
+                    })
+            except Exception as e:
+                logger.error(f"Crisis fetch failed: {e}")
 
         items.sort(key=lambda x: x["score"], reverse=True)
-        items = items[:req.top_k]
+        items = forced_crisis + items[:top_k]
 
         elapsed = time.perf_counter() - start_time
-        logger.info(f"Query completed: {len(items)} hits, {elapsed:.3f}s")
+        logger.info(f"Retrieved {len(items)} items in {elapsed:.3f}s")
 
         return {
             "code": 200,
             "msg": "success",
-            "results": items
+            "detected_topics": detected_topics,
+            "detected_content_type": detected_ct,
+            "used_filter": used_filter,
+            "results": items,
         }
 
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {e}")
         logger.error(traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={
-                "code": 50000,
-                "msg": f"服务内部错误: {str(e)}",
-                "data": None
-            }
+            content={"code": 50000, "msg": f"服务内部错误: {e}", "data": None},
         )
 
 
+# ===== 健康检查 =====
 @app.get("/health")
 def health_check():
-    """健康检查接口"""
     if collection is None:
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "unhealthy",
-                "service": "knowledge-retrieval",
-                "doc_count": 0,
-                "error": "知识库未初始化"
-            }
+            content={"status": "unhealthy", "doc_count": 0},
         )
     return {
         "status": "ok",
         "service": "knowledge-retrieval",
         "doc_count": collection.count(),
-        "tag1_count": tag1_collection.count() if tag1_collection else 0,
-        "tag2_count": tag2_collection.count() if tag2_collection else 0
     }
