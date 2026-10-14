@@ -446,6 +446,11 @@ async def agent_analyze(
                 "analysis": {
                     "image_emotion": image_emotion_data,
                     "text_sentiment": result.get("emotion_label", "neutral"),
+                    "text_emotions": emotion_features.get("text_emotion_labels", []),
+                    "text_confidence": emotion_features.get("text_confidence"),
+                    "text_intensity": emotion_features.get("text_intensity"),
+                    "text_scores": emotion_features.get("text_scores", {}),
+                    "text_model": emotion_features.get("text_model", ""),
                     "text_keywords": [],
                 },
                 "decision": result.get("user_intent", "unclear"),
@@ -505,6 +510,8 @@ async def agent_chat(req: FrontendChatRequest):
             result.get("emotion_label", ""), elapsed,
         )
 
+        emotion_features = result.get("emotion_features", {}) or {}
+
         return {
             "code": 200,
             "msg": "success",
@@ -512,6 +519,11 @@ async def agent_chat(req: FrontendChatRequest):
                 "analysis": {
                     "image_emotion": {},
                     "text_sentiment": result.get("emotion_label", "neutral"),
+                    "text_emotions": emotion_features.get("text_emotion_labels", []),
+                    "text_confidence": emotion_features.get("text_confidence"),
+                    "text_intensity": emotion_features.get("text_intensity"),
+                    "text_scores": emotion_features.get("text_scores", {}),
+                    "text_model": emotion_features.get("text_model", ""),
                     "text_keywords": [],
                 },
                 "decision": result.get("user_intent", "unclear"),

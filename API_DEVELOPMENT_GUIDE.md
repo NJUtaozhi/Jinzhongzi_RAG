@@ -22,6 +22,7 @@ OPENAI_API_KEY=你的API_Key
 OPENAI_API_BASE=https://open.bigmodel.cn/api/paas/v4/
 VISION_API_URL=http://vision:8001/v1/vision/analyze-face
 KNOWLEDGE_API_URL=http://knowledge:8002/v1/knowledge/retrieve
+TEXT_SENTIMENT_API_URL=http://knowledge:8002/v1/text/analyze-sentiment
 
 # Frontend
 AGENT_API_URL=http://agent:8003/v1/agent/analyze
@@ -170,11 +171,20 @@ Docker 环境:  http://agent:8003 + /v1/agent/analyze → http://agent:8003/v1/a
 |---|---|---|---|
 | `POST` | `/v1/agent/analyze` | 多模态情绪分析与决策 | `multipart/form-data` |
 | `POST` | `/v1/knowledge/retrieve` | 心理学知识语义检索 | `application/json` |
+| `POST` | `/v1/text/analyze-sentiment` | 真实中文模型情绪分类 | `application/json` |
 | `POST` | `/v1/vision/analyze-face` | 面部动作单元（AU）分析 | `multipart/form-data` |
 
 详细请求/响应 Schema 见 `api_spec.yaml`（OpenAPI 3.0 格式）。
 
-### 4.1 Week 6 量表字段
+### 4.1 文本情绪模型
+
+请求：`{"text":"我最近很害怕，也有些难过"}`。成功响应的 `data`
+包含 `sentiment`、`emotions`、`confidence`、`intensity`、`valence`、
+`scores`、`method`、`model` 和 `latency_ms`。`method` 必须为
+`transformer-model`，不得使用关键词或 LLM 冒充模型推理。模型未上传时返回
+HTTP 503 与业务码 `50310`；空文本返回 HTTP 400 与业务码 `40013`。
+
+### 4.2 Week 6 量表字段
 
 `/chat` 在 JSON 请求中直接接收对象；`/v1/agent/analyze` 因使用 multipart，接收同一对象的 JSON 字符串：
 

@@ -12,6 +12,12 @@ from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 import chromadb
 
+try:
+    from .sentiment_api import router as sentiment_router
+    from .sentiment_model import sentiment_model
+except ImportError:  # uvicorn main:app inside /app
+    from sentiment_api import router as sentiment_router
+    from sentiment_model import sentiment_model
 
 # ===== 路径与常量 =====
 BASE_DIR = Path(__file__).parent.absolute()
@@ -103,6 +109,7 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 app = FastAPI(title="Knowledge Retrieval Service")
+app.include_router(sentiment_router)
 
 # ===== 初始化 =====
 try:
@@ -397,4 +404,9 @@ def health_check():
         "status": "ok",
         "service": "knowledge-retrieval",
         "doc_count": collection.count(),
+        "sentiment_model": {
+            "loaded": sentiment_model.loaded,
+            "model": sentiment_model.model_id,
+            "error": sentiment_model.load_error or None,
+        },
     }

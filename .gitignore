@@ -39,3 +39,7 @@ agent_harness/
 # 本地材料（论文/项目文档，含版权全文与私密材料，勿入库/勿上传）
 项目材料/
 论文材料/
+
+# Task 7.1 offline model weights (keep only the instructions)
+models/chinese-emotion/*
+!models/chinese-emotion/README.md
