@@ -34,6 +34,13 @@ class RetrievalResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def _normalize_source(value: Any) -> str:
+    """归一化来源字段: 旧版为字符串, 新版为结构化对象 {"name": ..., "type": ...}."""
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("title") or "").strip()
+    return str(value or "").strip()
+
+
 @dataclass
 class RAGContext:
     """RAG 检索上下文."""
@@ -164,7 +171,7 @@ class RAGClient:
         for item in items:
             docs.append(RetrievalResult(
                 content=item.get("content", item.get("text", "")),
-                source=item.get("source", item.get("title", "")),
+                source=_normalize_source(item.get("source", item.get("title", ""))),
                 relevance_score=float(item.get("score", item.get("relevance", 0.0))),
                 metadata={k: v for k, v in item.items()
                           if k not in ("content", "text", "source", "title",

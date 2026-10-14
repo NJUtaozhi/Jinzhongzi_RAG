@@ -53,3 +53,34 @@ def test_parse_empty_and_malformed():
     assert _client()._parse_response({}) == []
     assert _client()._parse_response({"results": None, "data": None}) == []
     assert _client()._parse_response({"results": "not-a-list"}) == []
+
+
+def test_parse_structured_source_object():
+    """新版格式: source 为结构化对象 {"name": ..., "type": ...}，应取 name 字符串"""
+    raw = {
+        "code": 200,
+        "msg": "success",
+        "results": [
+            {
+                "text": "GAD-7 是自评工具",
+                "source": {"name": "GAD-7量表", "type": "original_instrument"},
+                "score": 0.8,
+            },
+        ],
+    }
+    docs = _client()._parse_response(raw)
+    assert len(docs) == 1
+    assert docs[0].source == "GAD-7量表"          # 不是 dict 原型串
+    assert docs[0].content == "GAD-7 是自评工具"   # text 字段兜底
+
+
+def test_parse_source_object_without_name():
+    """结构化 source 缺 name 时应返回空串而不是抛异常/dict串"""
+    raw = {"results": [{"text": "x", "source": {"type": "paper"}, "score": 0.5}]}
+    assert _client()._parse_response(raw)[0].source == ""
+
+
+def test_parse_source_legacy_string_kept():
+    """旧版字符串 source 保持原样"""
+    raw = {"results": [{"content": "x", "source": "焦虑干预手册", "score": 0.5}]}
+    assert _client()._parse_response(raw)[0].source == "焦虑干预手册"
