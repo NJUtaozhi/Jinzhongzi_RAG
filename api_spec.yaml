@@ -356,7 +356,11 @@
                   },
                   "top_k": {
                     "type": "integer",
-                    "description": "返回最相关的知识片段条数，默认为1"
+                    "description": "返回最相关的知识片段条数，默认5"
+                  },
+                  "crisis_signal": {
+                    "type": "boolean",
+                    "description": "上游传入的危机信号（可选，默认false）。为true时强制补充全部 crisis_rule 条目"
                   }
                 },
                 "required": [
@@ -365,7 +369,8 @@
               },
               "example": {
                 "query": "感到焦虑和压力大时应该如何应对",
-                "top_k": 1
+                "top_k": 5,
+                "crisis_signal": false
               }
             }
           },
@@ -387,60 +392,122 @@
                       "type": "string",
                       "description": "响应信息，\"success\"表示成功"
                     },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "results": {
-                          "type": "array",
-                          "items": {
+                    "detected_topics": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "查询侧检测到的主题列表（可为空）"
+                    },
+                    "detected_content_type": {
+                      "type": "string",
+                      "description": "查询侧检测到的内容类型（可为 null）"
+                    },
+                    "used_filter": {
+                      "type": "string",
+                      "description": "实际使用的元数据过滤档位（none / topics / content_type / topics+content_type）"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "条目唯一ID"
+                          },
+                          "text": {
+                            "type": "string",
+                            "description": "知识片段正文"
+                          },
+                          "topic": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "条目主题标签"
+                          },
+                          "content_type": {
+                            "type": "string",
+                            "description": "内容类型（definition / coping_strategy / crisis_rule / referral_resource 等）"
+                          },
+                          "source": {
                             "type": "object",
                             "properties": {
-                              "score": {
-                                "type": "number",
-                                "description": "相关性评分，0~1之间"
-                              },
-                              "source": {
+                              "name": {
                                 "type": "string",
-                                "description": "知识来源（论文/书籍/报告名称）"
+                                "description": "来源名称"
                               },
-                              "content": {
+                              "type": {
                                 "type": "string",
-                                "description": "知识片段的具体内容"
+                                "description": "来源类型（peer_reviewed_paper / clinical_guideline / government_website 等）"
                               }
                             },
-                            "required": [
-                              "score",
-                              "source",
-                              "content"
-                            ]
+                            "description": "结构化来源"
                           },
-                          "description": "检索结果列表，按相关性从高到低排列"
-                        }
+                          "score": {
+                            "type": "number",
+                            "description": "综合评分，0~1之间"
+                          },
+                          "score_breakdown": {
+                            "type": "object",
+                            "description": "评分分解（vector / source / content_type_match / topic_match）"
+                          },
+                          "is_crisis": {
+                            "type": "boolean",
+                            "description": "是否危机规则条目"
+                          },
+                          "forced": {
+                            "type": "boolean",
+                            "description": "是否由 crisis_signal 强制补充（仅危机补充条目有此字段）"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "text",
+                          "source",
+                          "score"
+                        ]
                       },
-                      "description": "响应数据主体",
-                      "required": [
-                        "results"
-                      ]
+                      "description": "检索结果列表，按综合评分从高到低排列"
                     }
                   },
                   "required": [
                     "code",
                     "msg",
-                    "data"
+                    "results"
                   ]
                 },
                 "example": {
                   "code": 200,
                   "msg": "success",
-                  "data": {
-                    "results": [
-                      {
-                        "content": "多项研究表明，正念冥想、规律的有氧运动（如跑步、游泳）以及建立稳定的社会支持网络，是缓解焦虑和压力的有效行为策略。",
-                        "source": "《大学生压力应对方式与心理健康的关系研究》，2020，心理学报。",
-                        "score": 0.92
-                      }
-                    ]
-                  }
+                  "detected_topics": [
+                    "焦虑"
+                  ],
+                  "detected_content_type": "coping_strategy",
+                  "used_filter": "topics+content_type",
+                  "results": [
+                    {
+                      "id": "anxiety_coping_01",
+                      "text": "多项研究表明，正念冥想、规律的有氧运动以及稳定的社会支持网络，是缓解焦虑和压力的有效行为策略。",
+                      "topic": [
+                        "焦虑"
+                      ],
+                      "content_type": "coping_strategy",
+                      "source": {
+                        "name": "国家心理健康网",
+                        "type": "government_website"
+                      },
+                      "score": 0.86,
+                      "score_breakdown": {
+                        "vector": 0.72,
+                        "source": 0.9,
+                        "content_type_match": 1.0,
+                        "topic_match": 1.0
+                      },
+                      "is_crisis": false
+                    }
+                  ]
                 }
               }
             },
